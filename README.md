@@ -1,0 +1,227 @@
+# Dwara MVP - Decentralized Identity with Passkeys
+
+A decentralized identity system using WebAuthn passkeys, Ethereum wallet, and blockchain anchoring.
+
+## 🌟 Features
+
+- **Passwordless Authentication**: Uses WebAuthn/Passkeys (Face ID, Touch ID, Windows Hello)
+- **Decentralized Identity (DID)**: Creates and manages DIDs anchored on blockchain
+- **QR Code Login**: Desktop-to-mobile authentication flow via QR codes
+- **Client-Side Encryption**: All PII is encrypted with AES-GCM before upload
+- **Blockchain Anchoring**: DID document hashes are stored on a local Hardhat chain
+- **Real-time Updates**: Socket.IO for instant authentication notifications
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│    Frontend     │────▶│     Backend     │────▶│    Hardhat      │
+│   (Next.js)     │     │   (Express)     │     │   (Ethereum)    │
+│   Port 3000     │     │   Port 4000     │     │   Port 8545     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                               │                          │
+                               ▼                          ▼
+                        ┌─────────────────┐     ┌─────────────────┐
+                        │   PostgreSQL    │     │   Blockscout    │
+                        │   Port 5432     │     │   Port 4001     │
+                        └─────────────────┘     └─────────────────┘
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose
+- Node.js >= 18 (for local development)
+- Git
+
+### Running with Docker Compose
+
+1. **Clone and setup**:
+   ```bash
+   git clone <repo-url>
+   cd dwara-mvp
+   ```
+
+2. **Start all services**:
+   ```bash
+   docker compose up --build
+   ```
+
+3. **Deploy the smart contract** (in a new terminal):
+   ```bash
+   docker compose exec hardhat npx hardhat run --network localhost scripts/deploy.js
+   ```
+   
+   Copy the deployed contract address and update `DWARA_REGISTRY_ADDRESS` in your environment if different from the default.
+
+4. **Run database migrations**:
+   ```bash
+   docker compose exec backend npx prisma migrate dev --name init
+   ```
+
+5. **Access the application**:
+   - Frontend: http://localhost:3000
+   - Backend API: http://localhost:4000
+   - Blockscout Explorer: http://localhost:4001
+   - Hardhat JSON-RPC: http://localhost:8545
+
+### Local Development (without Docker)
+
+1. **Install dependencies**:
+   ```bash
+   # Backend
+   cd backend && npm install
+   
+   # Frontend
+   cd frontend && npm install
+   
+   # Hardhat
+   cd hardhat && npm install
+   ```
+
+2. **Start Hardhat node**:
+   ```bash
+   cd hardhat
+   npx hardhat node
+   ```
+
+3. **Deploy contract**:
+   ```bash
+   cd hardhat
+   npx hardhat run --network localhost scripts/deploy.js
+   ```
+
+4. **Setup database** (requires PostgreSQL running):
+   ```bash
+   cd backend
+   cp .env.example .env
+   # Edit .env with your database URL
+   npx prisma migrate dev
+   ```
+
+5. **Start backend**:
+   ```bash
+   cd backend
+   npm run dev
+   ```
+
+6. **Start frontend**:
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+
+## 📋 Environment Variables
+
+### Backend (.env)
+
+```env
+DATABASE_URL=postgresql://app:pass@localhost:5432/dwara
+HARDHAT_RPC=http://localhost:8545
+DWARA_REGISTRY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+RELAYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+JWT_SECRET=your_secret_here
+ORIGIN=http://localhost:3000
+PORT=4000
+```
+
+### Frontend (.env)
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:4000
+```
+
+## 🔍 Blockchain Explorer (Blockscout)
+
+Blockscout is included to provide a web interface for exploring the local Hardhat blockchain:
+
+- **URL**: http://localhost:4001
+- **Features**:
+  - View all transactions and blocks
+  - Explore contract interactions
+  - See DID registration events
+  - Monitor account balances and activities
+
+Once you deploy the DwaraRegistry contract and register DIDs, you can:
+1. Search for the contract address in Blockscout
+2. View the `Registered` events when users sign up
+3. Explore transaction details and gas usage
+
+## 🔄 User Flows
+
+### Sign Up Flow
+
+1. User enters email on homepage
+2. Server creates magic link (displayed for demo)
+3. User clicks link → arrives at onboarding page
+4. WebAuthn creates passkey (biometric prompt)
+5. Client generates Ethereum wallet
+6. Client builds DID document and signs with wallet
+7. Server verifies attestation and anchors DID on blockchain
+8. User downloads backup (mnemonic + encryption key)
+
+### QR Login Flow
+
+1. Desktop creates QR session
+2. Desktop displays QR code and connects to Socket.IO
+3. Mobile scans QR → opens session URL
+4. Mobile performs WebAuthn authentication
+5. Server verifies and notifies desktop via Socket.IO
+6. Desktop receives token and logs in
+
+## 🔐 Security Notes
+
+- **No passwords stored**: Authentication is via WebAuthn passkeys only
+- **Client-side encryption**: PII is encrypted with AES-GCM before upload
+- **Recovery**: Users must backup their wallet mnemonic and encryption key
+- **Relayer**: The backend uses a funded account to pay gas for DID anchoring
+
+## 🛠️ Tech Stack
+
+- **Frontend**: Next.js 14, React 18, TailwindCSS
+- **Backend**: Node.js, Express, Socket.IO, Prisma
+- **Database**: PostgreSQL
+- **Blockchain**: Hardhat (local Ethereum)
+- **Authentication**: @simplewebauthn/browser & @simplewebauthn/server
+- **Wallet**: ethers.js
+
+## 📁 Project Structure
+
+```
+dwara-mvp/
+├── frontend/          # Next.js 14 app
+│   ├── app/          # App router pages
+│   └── lib/          # Utilities (api, webauthn, crypto, wallet)
+├── backend/          # Express server
+│   └── index.js      # Main server file
+├── hardhat/          # Smart contracts
+│   ├── contracts/    # Solidity contracts
+│   └── scripts/      # Deploy scripts
+├── prisma/           # Database schema
+└── docker-compose.yml
+```
+
+## 🧪 Demo Script
+
+1. Open http://localhost:3000
+2. Enter email and click "Sign Up with Passkey"
+3. Click the magic link
+4. Complete passkey creation (biometric prompt)
+5. Download your backup file
+6. Go to dashboard
+7. Open login page in another browser/incognito
+8. Scan QR with your phone
+9. Authenticate with passkey on phone
+10. Watch desktop auto-login!
+
+## ⚠️ Known Limitations
+
+- WebAuthn requires HTTPS in production (works on localhost for dev)
+- Magic links are displayed (not emailed) for demo purposes
+- Single relayer account for gas payments
+- Local Hardhat chain (not production blockchain)
+
+## 📄 License
+
+MIT

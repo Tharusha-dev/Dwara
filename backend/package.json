@@ -1,0 +1,31 @@
+{
+  "name": "dwara-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:push": "prisma db push"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "socket.io": "^4.8.0",
+    "body-parser": "^1.20.2",
+    "@simplewebauthn/server": "^9.0.0",
+    "ethers": "^6.9.0",
+    "prisma": "^5.7.0",
+    "@prisma/client": "^5.7.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^9.0.1",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "prisma": {
+    "schema": "./prisma/schema.prisma"
+  }
+}

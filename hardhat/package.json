@@ -1,0 +1,14 @@
+{
+  "name": "hardhat-dwara",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "node": "hardhat node",
+    "deploy": "hardhat run --network localhost scripts/deploy.js",
+    "compile": "hardhat compile"
+  },
+  "devDependencies": {
+    "hardhat": "^2.19.0",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0"
+  }
+}

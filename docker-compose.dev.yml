@@ -1,0 +1,36 @@
+version: '3.8'
+
+# Development compose - uses volume mounts for hot reload
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dwara-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: dwara
+    volumes:
+      - postgres-data-dev:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d dwara"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  hardhat:
+    image: node:20-alpine
+    container_name: dwara-hardhat-dev
+    working_dir: /app
+    command: sh -c "npm install && npx hardhat node --hostname 0.0.0.0"
+    volumes:
+      - ./hardhat:/app
+      - hardhat-node-modules:/app/node_modules
+    ports:
+      - "8545:8545"
+
+volumes:
+  postgres-data-dev:
+  hardhat-node-modules:
