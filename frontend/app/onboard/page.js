@@ -2,38 +2,30 @@
 
 import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { validateMagicToken, getRegistrationOptions, registerDID } from '../../lib/api';
-import { registerWebAuthn, isWebAuthnSupported, isPlatformAuthenticatorAvailable } from '../../lib/webauthn';
-import { createWallet, buildDIDDocument, hashDIDDocument, signMessage } from '../../lib/wallet';
-import { generateAESKey, exportKey, encryptObject, downloadFile } from '../../lib/crypto';
+import { QRCodeSVG } from 'qrcode.react';
+import { io } from 'socket.io-client';
+import { validateMagicToken, createSignupQRSession } from '../../lib/api';
+import { downloadFile } from '../../lib/crypto';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 function OnboardContent() {
   const [step, setStep] = useState(0);
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [walletInfo, setWalletInfo] = useState(null);
-  const [didInfo, setDidInfo] = useState(null);
+  const [qrData, setQrData] = useState(null);
   const [registrationResult, setRegistrationResult] = useState(null);
-  const [webAuthnSupported, setWebAuthnSupported] = useState(true);
   
   const router = useRouter();
   const searchParams = useSearchParams();
   const magicToken = searchParams.get('magic');
 
   useEffect(() => {
-    checkWebAuthnSupport();
     if (magicToken) {
       validateToken();
     }
   }, [magicToken]);
-
-  const checkWebAuthnSupport = async () => {
-    const supported = isWebAuthnSupported();
-    // Allow if WebAuthn is supported, even if platform authenticator (TouchID/FaceID)
-    // is not explicitly detected (allows roaming authenticators like YubiKeys)
-    setWebAuthnSupported(supported);
-  };
 
   const validateToken = async () => {
     try {
@@ -48,67 +40,61 @@ function OnboardContent() {
     }
   };
 
-  const handleCreatePasskey = async () => {
-    setLoading(true);
-    setError('');
-
+  const initSignupQRSession = async () => {
     try {
-      // Step 1: Get registration options from server
-      const options = await getRegistrationOptions(email);
-      
-      // Step 2: Create credential with WebAuthn
-      const attestation = await registerWebAuthn(options);
-      
-      // Step 3: Create Ethereum wallet
-      const wallet = createWallet();
-      setWalletInfo(wallet);
-      
-      // Step 4: Build and sign DID document
-      const didDoc = buildDIDDocument(wallet.address, email);
-      const didHash = hashDIDDocument(didDoc);
-      const sigEth = await signMessage(wallet.wallet, didHash);
-      
-      setDidInfo({ didDoc, didHash, sigEth });
-      
-      // Step 5: Generate encryption key and encrypt PDS
-      const aesKey = await generateAESKey();
-      const exportedKey = await exportKey(aesKey);
-      const pdsData = {
-        email,
-        createdAt: new Date().toISOString(),
-        preferences: {},
+      setLoading(true);
+      setError('');
+
+      // Create signup QR session
+      const session = await createSignupQRSession(email, magicToken);
+      setQrData(session);
+
+      // Connect to Socket.IO
+      const socketUrl = API_URL.replace(/\/api\/?$/, '');
+      const socket = io(socketUrl, {
+        transports: ['websocket', 'polling'],
+      });
+
+      socket.on('connect', () => {
+        console.log('Socket connected');
+        socket.emit('join', session.sessionId);
+      });
+
+      socket.on('signup-complete', (data) => {
+        console.log('Signup completed:', data);
+        
+        // Save token
+        if (data.token) {
+          localStorage.setItem('dwara_token', data.token);
+        }
+
+        setRegistrationResult(data);
+        setStep(2);
+      });
+
+      socket.on('disconnect', () => {
+        console.log('Socket disconnected');
+      });
+
+      // Cleanup on unmount
+      return () => {
+        socket.disconnect();
       };
-      const encryptedPds = await encryptObject(pdsData, aesKey);
-      
-      // Step 6: Register DID with backend
-      const result = await registerDID({
-        attestation,
-        didDocJson: didDoc,
-        didDocHash: didHash,
-        ethAddress: wallet.address,
-        sigEth,
-        encryptedPds: JSON.stringify(encryptedPds),
-        challenge: options.challenge,
-      });
-      
-      // Save token
-      if (result.token) {
-        localStorage.setItem('dwara_token', result.token);
-      }
-      
-      setRegistrationResult({
-        ...result,
-        mnemonic: wallet.mnemonic,
-        encryptionKey: exportedKey,
-      });
-      
-      setStep(2);
     } catch (err) {
-      console.error('Registration error:', err);
-      setError(err.message || 'Registration failed. Please try again.');
+      console.error('Failed to create signup QR session:', err);
+      setError(err.response?.data?.error || 'Failed to create signup session. Please try again.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleShowQR = () => {
+    initSignupQRSession();
+  };
+
+  const handleRefreshQR = () => {
+    setQrData(null);
+    initSignupQRSession();
   };
 
   const handleDownloadBackup = () => {
@@ -116,8 +102,8 @@ function OnboardContent() {
     
     const backup = {
       did: registrationResult.did,
-      mnemonic: registrationResult.mnemonic,
-      encryptionKey: registrationResult.encryptionKey,
+      // Note: mnemonic and encryptionKey are now created on phone
+      // User should save them from phone or we need to transfer them securely
       createdAt: new Date().toISOString(),
       warning: 'KEEP THIS FILE SECURE! Anyone with this file can access your identity.',
     };
@@ -139,21 +125,6 @@ function OnboardContent() {
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mx-auto mb-4"></div>
           <p className="text-purple-200">Validating magic link...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!webAuthnSupported) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-8">
-        <div className="max-w-md w-full bg-white/10 backdrop-blur-lg rounded-2xl p-8 text-center">
-          <div className="text-5xl mb-4">⚠️</div>
-          <h2 className="text-2xl font-bold text-white mb-4">WebAuthn Not Supported</h2>
-          <p className="text-purple-200">
-            Your browser or device doesn't support passkeys. Please use a modern browser
-            with biometric authentication (Face ID, Touch ID, Windows Hello, etc.)
-          </p>
         </div>
       </div>
     );
@@ -186,7 +157,7 @@ function OnboardContent() {
           ))}
         </div>
 
-        {/* Step 1: Create Passkey */}
+        {/* Step 1: Show QR Code for Phone Registration */}
         {step === 1 && (
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-xl">
             <div className="text-center mb-6">
@@ -197,36 +168,80 @@ function OnboardContent() {
               </p>
             </div>
 
-            <div className="space-y-4 text-purple-200 mb-6">
-              <p>When you click the button below, we will:</p>
-              <ul className="list-disc list-inside space-y-2 text-sm">
-                <li>Create a secure passkey using your device's biometrics</li>
-                <li>Generate a new Ethereum wallet for your identity</li>
-                <li>Create your decentralized identity (DID) document</li>
-                <li>Anchor your DID on the blockchain</li>
-              </ul>
-            </div>
+            {!qrData ? (
+              <>
+                <div className="space-y-4 text-purple-200 mb-6">
+                  <p>To create your identity, you'll need to:</p>
+                  <ul className="list-disc list-inside space-y-2 text-sm">
+                    <li>Scan a QR code with your phone</li>
+                    <li>Create a secure passkey using your phone's biometrics (Face ID, Touch ID)</li>
+                    <li>Your identity will be anchored on the blockchain</li>
+                  </ul>
+                </div>
 
-            {error && (
-              <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
-                {error}
+                {error && (
+                  <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleShowQR}
+                  disabled={loading}
+                  className="w-full py-4 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-semibold rounded-lg transition-colors duration-200 text-lg"
+                >
+                  {loading ? (
+                    <span className="flex items-center justify-center">
+                      <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></span>
+                      Creating session...
+                    </span>
+                  ) : (
+                    'Show QR Code'
+                  )}
+                </button>
+              </>
+            ) : (
+              <div className="flex flex-col items-center">
+                <div className="bg-white p-4 rounded-xl mb-6">
+                  <QRCodeSVG
+                    value={qrData.url}
+                    size={220}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+
+                <div className="text-center mb-4">
+                  <p className="text-purple-300 text-sm">Scan this QR code with your phone's camera</p>
+                </div>
+
+                {qrData.contextNumber && (
+                  <div className="bg-purple-900/50 p-4 rounded-xl mb-6 border border-purple-500/30 w-full">
+                    <p className="text-purple-300 text-sm mb-1 text-center">Security Check</p>
+                    <p className="text-4xl font-bold text-white tracking-widest text-center">{qrData.contextNumber}</p>
+                    <p className="text-purple-300 text-xs mt-1 text-center">Select this number on your phone</p>
+                  </div>
+                )}
+
+                <div className="flex items-center text-purple-200 mb-4">
+                  <div className="animate-pulse w-2 h-2 bg-yellow-400 rounded-full mr-2"></div>
+                  Waiting for phone registration...
+                </div>
+
+                {error && (
+                  <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm w-full">
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleRefreshQR}
+                  className="text-purple-300 hover:text-purple-100 text-sm underline"
+                >
+                  Generate new QR code
+                </button>
               </div>
             )}
-
-            <button
-              onClick={handleCreatePasskey}
-              disabled={loading}
-              className="w-full py-4 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-semibold rounded-lg transition-colors duration-200 text-lg"
-            >
-              {loading ? (
-                <span className="flex items-center justify-center">
-                  <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></span>
-                  Creating identity...
-                </span>
-              ) : (
-                'Create Passkey & Identity'
-              )}
-            </button>
           </div>
         )}
 

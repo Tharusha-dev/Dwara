@@ -347,6 +347,309 @@ app.post('/create-qr-session', async (req, res) => {
 });
 
 /**
+ * Create QR session for desktop SIGNUP (new custom QR flow)
+ */
+app.post('/create-signup-qr-session', async (req, res) => {
+  try {
+    const { email, magicToken } = req.body;
+    if (!email || !magicToken) {
+      return res.status(400).json({ error: 'email and magicToken required' });
+    }
+
+    // Validate magic token
+    const magicSession = await prisma.session.findUnique({
+      where: { id: magicToken },
+    });
+    if (!magicSession || magicSession.type !== 'magic') {
+      return res.status(404).json({ error: 'invalid magic token' });
+    }
+    if (magicSession.payload.expiresAt < Date.now()) {
+      return res.status(400).json({ error: 'magic token expired' });
+    }
+    if (magicSession.payload.email !== email) {
+      return res.status(400).json({ error: 'email mismatch' });
+    }
+
+    const sessionId = uuidv4();
+    const challenge = bufferToBase64url(randomBytes(32));
+    const contextNumber = Math.floor(Math.random() * 90) + 10; // 10-99
+
+    await prisma.session.create({
+      data: {
+        id: sessionId,
+        type: 'signup-qr',
+        payload: {
+          email,
+          magicToken,
+          challenge,
+          status: 'pending',
+          contextNumber
+        },
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+      },
+    });
+
+    const url = `${ORIGIN}/qr/signup/${sessionId}`;
+    console.log(`Signup QR session created: ${sessionId}, context: ${contextNumber}`);
+    res.json({ sessionId, url, challenge, contextNumber });
+  } catch (err) {
+    console.error('Create signup QR session error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get signup QR session info
+ */
+app.get('/signup-qr/:sessionId', async (req, res) => {
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'signup-qr') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    // Generate candidates for context binding
+    const correctNumber = session.payload.contextNumber;
+    let candidates = [];
+
+    if (correctNumber) {
+      const correct = parseInt(correctNumber);
+      const decoys = new Set();
+      while (decoys.size < 2) {
+        const decoy = Math.floor(Math.random() * 90) + 10;
+        if (decoy !== correct) decoys.add(decoy);
+      }
+      candidates = [correct, ...decoys].sort(() => Math.random() - 0.5);
+    }
+
+    res.json({
+      sessionId: session.id,
+      email: session.payload.email,
+      challenge: session.payload.challenge,
+      status: session.payload.status,
+      candidates: candidates.length > 0 ? candidates : undefined
+    });
+  } catch (err) {
+    console.error('Get signup QR session error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get registration options for signup QR flow (phone requests this)
+ */
+app.post('/signup-qr/:sessionId/register-options', async (req, res) => {
+  try {
+    const { contextNumber } = req.body;
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'signup-qr') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    // Verify context binding
+    if (session.payload.contextNumber) {
+      if (!contextNumber || parseInt(contextNumber) !== parseInt(session.payload.contextNumber)) {
+        return res.status(400).json({ error: 'Incorrect context number' });
+      }
+    }
+
+    const email = session.payload.email;
+
+    // Find or create user
+    let user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      user = await prisma.user.create({ data: { email } });
+    }
+
+    // Check if user already has credentials
+    const excludeCredentials = user.credentialId
+      ? [
+        {
+          id: base64urlToBuffer(user.credentialId),
+          type: 'public-key',
+          transports: ['internal', 'hybrid'],
+        },
+      ]
+      : [];
+
+    const opts = await generateRegistrationOptions({
+      rpName: RP_NAME,
+      rpID: RP_ID,
+      userID: user.id,
+      userName: email,
+      userDisplayName: email,
+      timeout: 60000,
+      attestationType: 'none',
+      excludeCredentials,
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      supportedAlgorithmIDs: [-7, -257],
+    });
+
+    // Update session with the challenge
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        payload: { ...session.payload, challenge: opts.challenge },
+      },
+    });
+
+    console.log(`Signup QR registration options created for ${email}`);
+    res.json(opts);
+  } catch (err) {
+    console.error('Signup QR register options error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Complete registration from phone (signup QR flow)
+ */
+app.post('/signup-qr/:sessionId/complete', async (req, res) => {
+  try {
+    const {
+      attestation,
+      didDocJson,
+      didDocHash,
+      ethAddress,
+      sigEth,
+      encryptedPds,
+    } = req.body;
+
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'signup-qr') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    if (!attestation || !didDocJson || !didDocHash || !ethAddress) {
+      return res.status(400).json({ error: 'missing required fields' });
+    }
+
+    const challenge = session.payload.challenge;
+
+    // Verify WebAuthn attestation
+    const verification = await verifyRegistrationResponse({
+      response: attestation,
+      expectedChallenge: challenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: 'webauthn attestation verification failed' });
+    }
+
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    const credentialIdStr = bufferToBase64url(credentialID);
+    const credentialPubKeyStr = Buffer.from(credentialPublicKey).toString('base64');
+
+    // Verify Ethereum signature over didDocHash
+    if (sigEth) {
+      try {
+        const recovered = ethers.verifyMessage(didDocHash, sigEth);
+        if (recovered.toLowerCase() !== ethAddress.toLowerCase()) {
+          return res.status(400).json({ error: 'ethereum signature mismatch' });
+        }
+      } catch (sigErr) {
+        console.warn('Signature verification failed:', sigErr.message);
+      }
+    }
+
+    // Update user record
+    const user = await prisma.user.upsert({
+      where: { email: didDocJson.email },
+      update: {
+        walletAddress: ethAddress,
+        didHash: didDocHash,
+        didDocumentJson: didDocJson,
+        credentialId: credentialIdStr,
+        credentialPubKey: credentialPubKeyStr,
+        counter: counter,
+        encryptedPDS: encryptedPds || null,
+      },
+      create: {
+        email: didDocJson.email,
+        walletAddress: ethAddress,
+        didHash: didDocHash,
+        didDocumentJson: didDocJson,
+        credentialId: credentialIdStr,
+        credentialPubKey: credentialPubKeyStr,
+        counter: counter,
+        encryptedPDS: encryptedPds || null,
+      },
+    });
+
+    // Clean up sessions
+    await prisma.session.deleteMany({
+      where: { id: { in: [session.id, session.payload.magicToken] } },
+    });
+
+    // Anchor DID on blockchain via relayer
+    let txHash = null;
+    if (relayerWallet && DWARA_REGISTRY_ADDRESS) {
+      try {
+        const contractAbi = [
+          'function register(bytes32 didHash, address controller)',
+          'event Registered(address indexed controller, bytes32 didHash, uint256 ts)',
+        ];
+        const contract = new ethers.Contract(
+          DWARA_REGISTRY_ADDRESS,
+          contractAbi,
+          relayerWallet
+        );
+
+        const hashBytes32 = didDocHash.startsWith('0x')
+          ? didDocHash
+          : '0x' + didDocHash;
+
+        const tx = await contract.register(hashBytes32, ethAddress);
+        const receipt = await tx.wait();
+        txHash = receipt.hash;
+        console.log('DID anchored on chain, tx:', txHash);
+      } catch (chainErr) {
+        console.warn('Blockchain anchoring failed:', chainErr.message);
+      }
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: user.id,
+        email: user.email,
+        did: `did:dwara:${ethAddress.slice(2, 14).toLowerCase()}`,
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    const result = {
+      ok: true,
+      userId: user.id,
+      did: `did:dwara:${ethAddress.slice(2, 14).toLowerCase()}`,
+      txHash,
+      token,
+    };
+
+    // Emit socket event to desktop
+    io.to(session.id).emit('signup-complete', result);
+
+    console.log(`Signup QR registration complete for ${user.email}`);
+    res.json(result);
+  } catch (err) {
+    console.error('Signup QR complete error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
  * Get QR session info and challenge
  */
 app.get('/qr/:sessionId', async (req, res) => {

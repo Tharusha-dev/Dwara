@@ -69,6 +69,27 @@ export const submitAssertion = async (sessionId, assertion, email) => {
   return response.data;
 };
 
+// Signup QR Session (custom QR flow for registration)
+export const createSignupQRSession = async (email, magicToken) => {
+  const response = await api.post('/create-signup-qr-session', { email, magicToken });
+  return response.data;
+};
+
+export const getSignupQRSession = async (sessionId) => {
+  const response = await api.get(`/signup-qr/${sessionId}`);
+  return response.data;
+};
+
+export const getSignupRegisterOptions = async (sessionId, contextNumber) => {
+  const response = await api.post(`/signup-qr/${sessionId}/register-options`, { contextNumber });
+  return response.data;
+};
+
+export const completeSignupQR = async (sessionId, data) => {
+  const response = await api.post(`/signup-qr/${sessionId}/complete`, data);
+  return response.data;
+};
+
 // User
 export const getCurrentUser = async () => {
   const response = await api.get('/me');
