@@ -116,6 +116,12 @@ echo -e "${YELLOW}Configuring nginx...${NC}"
 sudo cp nginx.conf /etc/nginx/sites-available/dwara
 sudo sed -i "s/dwara.yourdomain.com/$DOMAIN/g" /etc/nginx/sites-available/dwara
 
+# Disable default site if it exists
+if [ -L /etc/nginx/sites-enabled/default ]; then
+    sudo rm /etc/nginx/sites-enabled/default
+    echo -e "${YELLOW}Disabled default nginx site${NC}"
+fi
+
 # Enable the site
 if [ ! -L /etc/nginx/sites-enabled/dwara ]; then
     sudo ln -s /etc/nginx/sites-available/dwara /etc/nginx/sites-enabled/

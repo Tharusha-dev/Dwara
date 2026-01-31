@@ -9,7 +9,7 @@ COPY backend/package*.json ./
 COPY prisma ./prisma/
 
 # Install system dependencies
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl curl
 
 # Install dependencies
 RUN npm install

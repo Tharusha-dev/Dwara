@@ -53,8 +53,11 @@ export const getQRSession = async (sessionId) => {
   return response.data;
 };
 
-export const getAuthOptions = async (sessionId, email) => {
-  const response = await api.post(`/qr/${sessionId}/auth-options`, { email });
+export const getAuthOptions = async (sessionId, email, contextNumber) => {
+  const response = await api.post(`/qr/${sessionId}/auth-options`, {
+    email,
+    contextNumber
+  });
   return response.data;
 };
 
