@@ -37,7 +37,7 @@ services:
       - hardhat-artifacts-prod:/app/artifacts
     # Remove port exposure for security - only accessible internally
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545"]
+      test: ["CMD", "sh", "-c", "nc -z localhost 8545 || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 3
@@ -63,7 +63,8 @@ services:
       ORIGIN: ${ORIGIN}
       PORT: 4000
       NODE_ENV: production
-    # Remove port exposure for security - only accessible via nginx
+    ports:
+      - "127.0.0.1:4000:4000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,7 +79,7 @@ services:
         reservations:
           memory: 512M
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -87,12 +88,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     container_name: dwara-frontend-prod
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       NODE_ENV: production
-    # Remove port exposure for security - only accessible via nginx
+    ports:
+      - "127.0.0.1:3000:3000"
     depends_on:
       - backend
     deploy:
@@ -102,7 +106,7 @@ services:
         reservations:
           memory: 512M
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -176,7 +180,8 @@ services:
       # Performance optimizations
       POOL_SIZE: 20
       POOL_SIZE_API: 10
-    # Remove port exposure for security - only accessible via nginx
+    ports:
+      - "127.0.0.1:4001:4000"
     depends_on:
       blockscout-postgres:
         condition: service_healthy
@@ -191,7 +196,7 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000"]
+      test: ["CMD", "curl", "-f", "http://localhost:4000"]
       interval: 60s
       timeout: 30s
       retries: 3

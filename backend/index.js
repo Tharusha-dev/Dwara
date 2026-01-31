@@ -140,12 +140,12 @@ app.post('/webauthn/register/options', async (req, res) => {
     // Check if user already has credentials
     const excludeCredentials = user.credentialId
       ? [
-          {
-            id: base64urlToBuffer(user.credentialId),
-            type: 'public-key',
-            transports: ['internal', 'hybrid'],
-          },
-        ]
+        {
+          id: base64urlToBuffer(user.credentialId),
+          type: 'public-key',
+          transports: ['internal', 'hybrid'],
+        },
+      ]
       : [];
 
     const opts = await generateRegistrationOptions({
@@ -321,19 +321,25 @@ app.post('/create-qr-session', async (req, res) => {
     const { email } = req.body;
     const sessionId = uuidv4();
     const challenge = bufferToBase64url(randomBytes(32));
+    const contextNumber = Math.floor(Math.random() * 90) + 10; // 10-99
 
     await prisma.session.create({
       data: {
         id: sessionId,
         type: 'qr',
-        payload: { email: email || null, challenge, status: 'pending' },
+        payload: {
+          email: email || null,
+          challenge,
+          status: 'pending',
+          contextNumber
+        },
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
       },
     });
 
     const url = `${ORIGIN}/qr/${sessionId}`;
-    console.log(`QR session created: ${sessionId}`);
-    res.json({ sessionId, url, challenge });
+    console.log(`QR session created: ${sessionId}, context: ${contextNumber}`);
+    res.json({ sessionId, url, challenge, contextNumber });
   } catch (err) {
     console.error('Create QR session error:', err);
     res.status(500).json({ error: 'server error' });
@@ -351,11 +357,27 @@ app.get('/qr/:sessionId', async (req, res) => {
     if (!session || session.type !== 'qr') {
       return res.status(404).json({ error: 'session not found' });
     }
+
+    // Generate candidates for context binding
+    const correctDetails = session.payload.contextNumber;
+    let candidates = [];
+
+    if (correctDetails) {
+      const correct = parseInt(correctDetails);
+      const decoys = new Set();
+      while (decoys.size < 2) {
+        const decoy = Math.floor(Math.random() * 90) + 10;
+        if (decoy !== correct) decoys.add(decoy);
+      }
+      candidates = [correct, ...decoys].sort(() => Math.random() - 0.5);
+    }
+
     res.json({
       sessionId: session.id,
       challenge: session.payload.challenge,
       status: session.payload.status,
       email: session.payload.email,
+      candidates: candidates.length > 0 ? candidates : undefined
     });
   } catch (err) {
     console.error('Get QR session error:', err);
@@ -374,6 +396,14 @@ app.post('/qr/:sessionId/auth-options', async (req, res) => {
     });
     if (!session || session.type !== 'qr') {
       return res.status(404).json({ error: 'session not found' });
+    }
+
+    // Verify context binding
+    const { contextNumber } = req.body;
+    if (session.payload.contextNumber) {
+      if (!contextNumber || parseInt(contextNumber) !== parseInt(session.payload.contextNumber)) {
+        return res.status(400).json({ error: 'Incorrect context number' });
+      }
     }
 
     // If email provided, get user's credential

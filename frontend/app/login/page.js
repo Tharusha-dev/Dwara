@@ -23,13 +23,15 @@ export default function LoginPage() {
     try {
       setLoading(true);
       setError('');
-      
+
       // Create QR session
       const session = await createQRSession();
       setQrData(session);
-      
+
       // Connect to Socket.IO
-      const socket = io(API_URL, {
+      // Use root domain for socket.io in production (remove /api suffix if present)
+      const socketUrl = API_URL.replace(/\/api\/?$/, '');
+      const socket = io(socketUrl, {
         transports: ['websocket', 'polling'],
       });
 
@@ -41,12 +43,12 @@ export default function LoginPage() {
       socket.on('authenticated', (data) => {
         console.log('Authentication successful:', data);
         setStatus('authenticated');
-        
+
         // Save token
         if (data.token) {
           localStorage.setItem('dwara_token', data.token);
         }
-        
+
         // Redirect to dashboard after short delay
         setTimeout(() => {
           router.push('/dashboard');
@@ -116,13 +118,21 @@ export default function LoginPage() {
                   includeMargin={false}
                 />
               </div>
-              
+
               <div className="text-center mb-6">
                 <p className="text-purple-300 text-sm mb-2">Or open this URL on your phone:</p>
                 <code className="text-xs text-purple-200 bg-white/10 px-3 py-1 rounded break-all">
                   {qrData.url}
                 </code>
               </div>
+
+              {qrData.contextNumber && (
+                <div className="bg-purple-900/50 p-4 rounded-xl mb-6 border border-purple-500/30">
+                  <p className="text-purple-300 text-sm mb-1">Security Check</p>
+                  <p className="text-3xl font-bold text-white tracking-widest">{qrData.contextNumber}</p>
+                  <p className="text-purple-300 text-xs mt-1">Select this number on your phone</p>
+                </div>
+              )}
 
               <div className="flex items-center text-purple-200">
                 <div className="animate-pulse w-2 h-2 bg-yellow-400 rounded-full mr-2"></div>

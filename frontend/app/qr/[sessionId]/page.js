@@ -34,7 +34,7 @@ function QRAuthContent({ sessionId }) {
     }
   };
 
-  const handleAuthenticate = async () => {
+  const handleAuthenticate = async (contextNumber = null) => {
     if (!email) {
       setError('Please enter your email');
       return;
@@ -45,14 +45,14 @@ function QRAuthContent({ sessionId }) {
 
     try {
       // Get authentication options
-      const options = await getAuthOptions(sessionId, email);
-      
+      const options = await getAuthOptions(sessionId, email, contextNumber);
+
       // Perform WebAuthn authentication
       const assertion = await getAssertion(options);
-      
+
       // Submit assertion to server
       await submitAssertion(sessionId, assertion, email);
-      
+
       setSuccess(true);
     } catch (err) {
       console.error('Authentication error:', err);
@@ -136,26 +136,48 @@ function QRAuthContent({ sessionId }) {
                 />
               </div>
 
+              {session.candidates && session.candidates.length > 0 && (
+                <div className="mb-8">
+                  <label className="block text-sm font-medium text-purple-200 mb-3 text-center">
+                    Tap the number shown on your desktop
+                  </label>
+                  <div className="grid grid-cols-3 gap-4">
+                    {session.candidates.map((num) => (
+                      <button
+                        key={num}
+                        onClick={() => handleAuthenticate(num)}
+                        disabled={authenticating || !email}
+                        className="aspect-square flex items-center justify-center text-2xl font-bold bg-white/5 hover:bg-white/20 border border-purple-500/30 rounded-xl text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed active:bg-purple-600"
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {error && (
                 <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
                   {error}
                 </div>
               )}
 
-              <button
-                onClick={handleAuthenticate}
-                disabled={authenticating || !email}
-                className="w-full py-4 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-semibold rounded-lg transition-colors duration-200"
-              >
-                {authenticating ? (
-                  <span className="flex items-center justify-center">
-                    <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></span>
-                    Authenticating...
-                  </span>
-                ) : (
-                  '🔑 Authenticate with Passkey'
-                )}
-              </button>
+              {(!session.candidates || session.candidates.length === 0) && (
+                <button
+                  onClick={() => handleAuthenticate()}
+                  disabled={authenticating || !email}
+                  className="w-full py-4 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-semibold rounded-lg transition-colors duration-200"
+                >
+                  {authenticating ? (
+                    <span className="flex items-center justify-center">
+                      <span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></span>
+                      Authenticating...
+                    </span>
+                  ) : (
+                    '🔑 Authenticate with Passkey'
+                  )}
+                </button>
+              )}
 
               <p className="mt-4 text-center text-purple-300 text-sm">
                 Your device will prompt you to verify your identity using Face ID, Touch ID, or another biometric.
@@ -170,7 +192,7 @@ function QRAuthContent({ sessionId }) {
 
 export default function QRAuthPage({ params }) {
   const { sessionId } = params;
-  
+
   return (
     <Suspense fallback={
       <div className="min-h-screen flex items-center justify-center">
