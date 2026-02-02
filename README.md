@@ -6,7 +6,7 @@ A decentralized identity system using WebAuthn passkeys, Ethereum wallet, and bl
 
 - **Passwordless Authentication**: Uses WebAuthn/Passkeys (Face ID, Touch ID, Windows Hello)
 - **Decentralized Identity (DID)**: Creates and manages DIDs anchored on blockchain
-- **QR Code Login**: Desktop-to-mobile authentication flow via QR codes
+- **QR Code Login**: Custom relay-based flow with **Phishing-resistant Context Binding**
 - **Client-Side Encryption**: All PII is encrypted with AES-GCM before upload
 - **Blockchain Anchoring**: DID document hashes are stored on a local Hardhat chain
 - **Real-time Updates**: Socket.IO for instant authentication notifications
@@ -148,6 +148,25 @@ Once you deploy the DwaraRegistry contract and register DIDs, you can:
 2. View the `Registered` events when users sign up
 3. Explore transaction details and gas usage
 
+## ⛓️ Blockchain Integration
+
+Dwara uses a hybrid architecture where identity control is decentralized, but user experience is streamlined via a relayer.
+
+### Smart Contract: DwaraRegistry
+The core is a minimal Solidity contract (`DwaraRegistry.sol`) deployed on a local Hardhat network (Ethereum compatible).
+- **Mapping**: Stores `address => bytes32` (Controller Address -> DID Document Hash).
+- **Immutability**: Once registered, the DID hash serves as a timestamped proof of existence.
+
+### Anchoring Process (Gasless)
+1. **User Action**: User generates a DID Document client-side and signs it with their Ethereum wallet.
+2. **Off-Chain Relay**: The signature and data are sent to the backend.
+3. **On-Chain Transaction**: The backend (acting as a Relayer) validates the signature and submits the transaction to the blockchain, paying the gas fees.
+4. **Result**: The user gets a decentralized identity without needing to hold ETH.
+
+### Data Privacy
+- **On-Chain**: Only the **Hash** of the DID Document is stored. No PII is ever visible on the blockchain.
+- **Off-Chain**: The encrypted DID Document is stored in the application database (PostgreSQL), accessible only by the user's keys.
+
 ## 🔄 User Flows
 
 ### Sign Up Flow
@@ -161,18 +180,20 @@ Once you deploy the DwaraRegistry contract and register DIDs, you can:
 7. Server verifies attestation and anchors DID on blockchain
 8. User downloads backup (mnemonic + encryption key)
 
-### QR Login Flow
+### QR Login Flow (Custom w/ Context Binding)
 
-1. Desktop creates QR session
-2. Desktop displays QR code and connects to Socket.IO
-3. Mobile scans QR → opens session URL
-4. Mobile performs WebAuthn authentication
-5. Server verifies and notifies desktop via Socket.IO
-6. Desktop receives token and logs in
+1. **Desktop** initiates session: Displays unique QR code AND a **2-digit Context Number**.
+2. **Mobile** scans QR: Opens the secure authentication page.
+3. **Context Binding**: Mobile displays 3 candidate numbers. User must tap the number that matches the one shown on Desktop.
+   - *This proves user presence and prevents phishing (remote attackers can't see the desktop screen).*
+4. **Authentication**: After correct match, Mobile prompts for WebAuthn (Face ID / Touch ID).
+5. **Completion**: Server verifies signature and notifies Desktop via Socket.IO.
+6. **Desktop** automatically logs in.
 
 ## 🔐 Security Notes
 
 - **No passwords stored**: Authentication is via WebAuthn passkeys only
+- **Context Binding**: QR flow requires number matching to ensure the user is physically present at the screen, preventing remote phishing attacks.
 - **Client-side encryption**: PII is encrypted with AES-GCM before upload
 - **Recovery**: Users must backup their wallet mnemonic and encryption key
 - **Relayer**: The backend uses a funded account to pay gas for DID anchoring
