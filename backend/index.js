@@ -879,6 +879,340 @@ app.get('/me', async (req, res) => {
   }
 });
 
+// ============================================
+// PASSWORD-BASED AUTHENTICATION ENDPOINTS
+// ============================================
+
+/**
+ * Initialize password-based registration
+ * Creates a unique salt for the user and returns it
+ * The password is NEVER sent to the server
+ */
+app.post('/password/register/init', async (req, res) => {
+  try {
+    const { email, magicToken } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    // Validate magic token if provided
+    if (magicToken) {
+      const magicSession = await prisma.session.findUnique({
+        where: { id: magicToken },
+      });
+      if (!magicSession || magicSession.type !== 'magic') {
+        return res.status(404).json({ error: 'invalid magic token' });
+      }
+      if (magicSession.payload.expiresAt < Date.now()) {
+        return res.status(400).json({ error: 'magic token expired' });
+      }
+      if (magicSession.payload.email !== email) {
+        return res.status(400).json({ error: 'email mismatch' });
+      }
+    }
+
+    // Check if user already exists with credentials
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser && existingUser.walletAddress) {
+      return res.status(400).json({ error: 'user already registered' });
+    }
+
+    // Generate a unique salt for this user (32 bytes, base64 encoded)
+    const salt = randomBytes(32).toString('base64');
+
+    // Create a session to store the salt and email for the registration flow
+    const sessionId = uuidv4();
+    await prisma.session.create({
+      data: {
+        id: sessionId,
+        type: 'password-register',
+        payload: { email, salt, magicToken },
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+      },
+    });
+
+    console.log(`Password registration initialized for ${email}`);
+    res.json({ sessionId, salt });
+  } catch (err) {
+    console.error('Password register init error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Complete password-based registration
+ * Client sends: derived wallet address, DID doc, and signature proof
+ * Password is NEVER transmitted - only the derived public key
+ */
+app.post('/password/register/complete', async (req, res) => {
+  try {
+    const {
+      sessionId,
+      ethAddress,
+      didDocJson,
+      didDocHash,
+      proofSignature, // Signature of sessionId to prove ownership of derived key
+      encryptedPds,
+    } = req.body;
+
+    if (!sessionId || !ethAddress || !didDocJson || !didDocHash || !proofSignature) {
+      return res.status(400).json({ error: 'missing required fields' });
+    }
+
+    // Get the registration session
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session || session.type !== 'password-register') {
+      return res.status(404).json({ error: 'invalid session' });
+    }
+    if (session.expiresAt < new Date()) {
+      return res.status(400).json({ error: 'session expired' });
+    }
+
+    const { email, salt, magicToken } = session.payload;
+
+    // Verify the proof signature - client signs the sessionId with their derived key
+    // This proves they know the password without revealing it
+    try {
+      const recovered = ethers.verifyMessage(sessionId, proofSignature);
+      if (recovered.toLowerCase() !== ethAddress.toLowerCase()) {
+        return res.status(400).json({ error: 'proof signature mismatch - invalid password' });
+      }
+    } catch (sigErr) {
+      console.error('Signature verification failed:', sigErr.message);
+      return res.status(400).json({ error: 'invalid proof signature' });
+    }
+
+    // Create or update the user with password-based auth
+    const user = await prisma.user.upsert({
+      where: { email },
+      update: {
+        walletAddress: ethAddress,
+        didHash: didDocHash,
+        didDocumentJson: didDocJson,
+        passwordSalt: salt,
+        authMethod: 'password',
+        encryptedPDS: encryptedPds || null,
+      },
+      create: {
+        email,
+        walletAddress: ethAddress,
+        didHash: didDocHash,
+        didDocumentJson: didDocJson,
+        passwordSalt: salt,
+        authMethod: 'password',
+        encryptedPDS: encryptedPds || null,
+      },
+    });
+
+    // Clean up sessions
+    const sessionsToDelete = [sessionId];
+    if (magicToken) sessionsToDelete.push(magicToken);
+    await prisma.session.deleteMany({
+      where: { id: { in: sessionsToDelete } },
+    });
+
+    // Anchor DID on blockchain via relayer
+    let txHash = null;
+    if (relayerWallet && DWARA_REGISTRY_ADDRESS) {
+      try {
+        const contractAbi = [
+          'function register(bytes32 didHash, address controller)',
+          'event Registered(address indexed controller, bytes32 didHash, uint256 ts)',
+        ];
+        const contract = new ethers.Contract(
+          DWARA_REGISTRY_ADDRESS,
+          contractAbi,
+          relayerWallet
+        );
+
+        const hashBytes32 = didDocHash.startsWith('0x')
+          ? didDocHash
+          : '0x' + didDocHash;
+
+        const tx = await contract.register(hashBytes32, ethAddress);
+        const receipt = await tx.wait();
+        txHash = receipt.hash;
+        console.log('DID anchored on chain (password auth), tx:', txHash);
+      } catch (chainErr) {
+        console.warn('Blockchain anchoring failed:', chainErr.message);
+      }
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: user.id,
+        email: user.email,
+        did: `did:dwara:${ethAddress.slice(2, 14).toLowerCase()}`,
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    console.log(`Password registration complete for ${email}`);
+    res.json({
+      ok: true,
+      userId: user.id,
+      did: `did:dwara:${ethAddress.slice(2, 14).toLowerCase()}`,
+      txHash,
+      token,
+    });
+  } catch (err) {
+    console.error('Password register complete error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Initialize password-based login
+ * Returns the user's salt and a challenge to sign
+ */
+app.post('/password/login/init', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    // Find user
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      // Return generic error to prevent email enumeration
+      return res.status(400).json({ error: 'invalid credentials' });
+    }
+    if (!user.passwordSalt || user.authMethod !== 'password') {
+      return res.status(400).json({ error: 'password auth not enabled for this account' });
+    }
+
+    // Generate a random challenge
+    const challenge = bufferToBase64url(randomBytes(32));
+    const sessionId = uuidv4();
+
+    await prisma.session.create({
+      data: {
+        id: sessionId,
+        type: 'password-login',
+        payload: { 
+          email, 
+          challenge, 
+          walletAddress: user.walletAddress,
+          userId: user.id
+        },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes
+      },
+    });
+
+    console.log(`Password login initialized for ${email}`);
+    res.json({ 
+      sessionId, 
+      salt: user.passwordSalt, 
+      challenge 
+    });
+  } catch (err) {
+    console.error('Password login init error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Complete password-based login
+ * Client signs the challenge with their password-derived key
+ */
+app.post('/password/login/complete', async (req, res) => {
+  try {
+    const { sessionId, signature } = req.body;
+
+    if (!sessionId || !signature) {
+      return res.status(400).json({ error: 'missing required fields' });
+    }
+
+    // Get the login session
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session || session.type !== 'password-login') {
+      return res.status(404).json({ error: 'invalid session' });
+    }
+    if (session.expiresAt < new Date()) {
+      await prisma.session.delete({ where: { id: sessionId } });
+      return res.status(400).json({ error: 'session expired' });
+    }
+
+    const { challenge, walletAddress, userId, email } = session.payload;
+
+    // Verify the signature
+    try {
+      const recovered = ethers.verifyMessage(challenge, signature);
+      if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
+        return res.status(400).json({ error: 'invalid password' });
+      }
+    } catch (sigErr) {
+      console.error('Signature verification failed:', sigErr.message);
+      return res.status(400).json({ error: 'invalid signature' });
+    }
+
+    // Clean up session
+    await prisma.session.delete({ where: { id: sessionId } });
+
+    // Get user
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: user.id,
+        email: user.email,
+        did: user.walletAddress
+          ? `did:dwara:${user.walletAddress.slice(2, 14).toLowerCase()}`
+          : null,
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    console.log(`Password login successful for ${email}`);
+    res.json({ 
+      ok: true, 
+      token,
+      userId: user.id,
+      email: user.email,
+      did: user.walletAddress
+        ? `did:dwara:${user.walletAddress.slice(2, 14).toLowerCase()}`
+        : null,
+    });
+  } catch (err) {
+    console.error('Password login complete error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Check if user has password auth enabled
+ */
+app.get('/auth-method/:email', async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ 
+      where: { email: req.params.email },
+      select: { authMethod: true, credentialId: true }
+    });
+    
+    if (!user) {
+      return res.json({ exists: false });
+    }
+    
+    res.json({ 
+      exists: true,
+      authMethod: user.authMethod || 'passkey',
+      hasPasskey: !!user.credentialId,
+      hasPassword: user.authMethod === 'password'
+    });
+  } catch (err) {
+    console.error('Auth method check error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
 /**
  * Socket.IO connection handler
  */

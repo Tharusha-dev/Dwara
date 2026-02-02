@@ -17,6 +17,8 @@ model User {
   credentialPubKey String?
   counter          Int      @default(0)
   encryptedPDS     String?
+  passwordSalt     String?  // Salt for password-derived key (not secret, but unique per user)
+  authMethod       String   @default("passkey") // "passkey" or "password"
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }

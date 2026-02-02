@@ -95,3 +95,59 @@ export const getCurrentUser = async () => {
   const response = await api.get('/me');
   return response.data;
 };
+
+// ============================================
+// PASSWORD-BASED AUTHENTICATION
+// ============================================
+
+/**
+ * Initialize password-based registration
+ * @param {string} email
+ * @param {string} magicToken - Optional magic token for verification
+ * @returns {Promise<{sessionId: string, salt: string}>}
+ */
+export const initPasswordRegister = async (email, magicToken) => {
+  const response = await api.post('/password/register/init', { email, magicToken });
+  return response.data;
+};
+
+/**
+ * Complete password-based registration
+ * @param {Object} data - Registration data including sessionId, ethAddress, didDocJson, etc.
+ * @returns {Promise<{ok: boolean, userId: string, did: string, txHash: string, token: string}>}
+ */
+export const completePasswordRegister = async (data) => {
+  const response = await api.post('/password/register/complete', data);
+  return response.data;
+};
+
+/**
+ * Initialize password-based login
+ * @param {string} email
+ * @returns {Promise<{sessionId: string, salt: string, challenge: string}>}
+ */
+export const initPasswordLogin = async (email) => {
+  const response = await api.post('/password/login/init', { email });
+  return response.data;
+};
+
+/**
+ * Complete password-based login
+ * @param {string} sessionId
+ * @param {string} signature - Signature of the challenge
+ * @returns {Promise<{ok: boolean, token: string, userId: string, email: string, did: string}>}
+ */
+export const completePasswordLogin = async (sessionId, signature) => {
+  const response = await api.post('/password/login/complete', { sessionId, signature });
+  return response.data;
+};
+
+/**
+ * Check authentication method for a user
+ * @param {string} email
+ * @returns {Promise<{exists: boolean, authMethod?: string, hasPasskey?: boolean, hasPassword?: boolean}>}
+ */
+export const checkAuthMethod = async (email) => {
+  const response = await api.get(`/auth-method/${encodeURIComponent(email)}`);
+  return response.data;
+};
