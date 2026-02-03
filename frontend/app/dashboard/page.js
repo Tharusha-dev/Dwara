@@ -2,12 +2,19 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser } from '../../lib/api';
+import { QRCodeSVG } from 'qrcode.react';
+import { io } from 'socket.io-client';
+import { getCurrentUser, createLinkPasskeySession } from '../../lib/api';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 export default function DashboardPage() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [linkPasskeyData, setLinkPasskeyData] = useState(null);
+  const [linkPasskeyLoading, setLinkPasskeyLoading] = useState(false);
+  const [linkPasskeySuccess, setLinkPasskeySuccess] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -40,6 +47,50 @@ export default function DashboardPage() {
   const handleLogout = () => {
     localStorage.removeItem('dwara_token');
     router.push('/');
+  };
+
+  const handleLinkPasskey = async () => {
+    try {
+      setLinkPasskeyLoading(true);
+      setError('');
+
+      const session = await createLinkPasskeySession();
+      setLinkPasskeyData(session);
+
+      // Connect to Socket.IO
+      const socketUrl = API_URL.replace(/\/api\/?$/, '');
+      const socket = io(socketUrl, {
+        transports: ['websocket', 'polling'],
+      });
+
+      socket.on('connect', () => {
+        console.log('Socket connected for link passkey');
+        socket.emit('join', session.sessionId);
+      });
+
+      socket.on('passkey-linked', (data) => {
+        console.log('Passkey linked:', data);
+        setLinkPasskeySuccess(true);
+        setLinkPasskeyData(null);
+        // Reload user to get updated hasPasskey status
+        loadUser();
+        socket.disconnect();
+      });
+
+      socket.on('disconnect', () => {
+        console.log('Socket disconnected');
+      });
+
+    } catch (err) {
+      console.error('Failed to create link passkey session:', err);
+      setError(err.response?.data?.error || 'Failed to create session');
+    } finally {
+      setLinkPasskeyLoading(false);
+    }
+  };
+
+  const cancelLinkPasskey = () => {
+    setLinkPasskeyData(null);
   };
 
   if (loading) {
@@ -136,13 +187,87 @@ export default function DashboardPage() {
             <h3 className="text-lg font-semibold text-white mb-4 flex items-center">
               <span className="mr-2">🔐</span> Security
             </h3>
-            <p className="text-purple-200 text-sm mb-4">
-              Your identity is secured by WebAuthn passkeys and anchored on the blockchain.
-            </p>
-            <div className="flex items-center text-green-400">
-              <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-              Passkey Active
+            
+            {/* Passkey Status */}
+            <div className="mb-4">
+              {user?.hasPasskey ? (
+                <div className="flex items-center text-green-400 mb-2">
+                  <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
+                  Passkey Linked
+                </div>
+              ) : (
+                <div className="flex items-center text-yellow-400 mb-2">
+                  <span className="w-2 h-2 bg-yellow-400 rounded-full mr-2"></span>
+                  No Passkey Linked
+                </div>
+              )}
+              <div className="flex items-center text-green-400">
+                <span className="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
+                Password Active
+              </div>
             </div>
+
+            {/* Link Passkey Section */}
+            {!user?.hasPasskey && !linkPasskeyData && (
+              <div className="mt-4 pt-4 border-t border-purple-500/30">
+                <p className="text-purple-200 text-sm mb-4">
+                  Add a passkey for faster, more secure logins using your phone's biometrics.
+                </p>
+                <button
+                  onClick={handleLinkPasskey}
+                  disabled={linkPasskeyLoading}
+                  className="w-full py-2 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-medium rounded-lg transition-colors"
+                >
+                  {linkPasskeyLoading ? 'Creating session...' : '🔑 Link Passkey'}
+                </button>
+              </div>
+            )}
+
+            {/* QR Code for linking passkey */}
+            {linkPasskeyData && (
+              <div className="mt-4 pt-4 border-t border-purple-500/30">
+                <p className="text-purple-200 text-sm mb-4 text-center">
+                  Scan this QR code with your phone to link your passkey
+                </p>
+                <div className="flex justify-center mb-4">
+                  <div className="bg-white p-3 rounded-xl">
+                    <QRCodeSVG
+                      value={linkPasskeyData.url}
+                      size={160}
+                      level="M"
+                      includeMargin={false}
+                    />
+                  </div>
+                </div>
+                
+                {linkPasskeyData.contextNumber && (
+                  <div className="bg-purple-900/50 p-3 rounded-xl mb-4 border border-purple-500/30 text-center">
+                    <p className="text-purple-300 text-xs mb-1">Security Check</p>
+                    <p className="text-2xl font-bold text-white tracking-widest">{linkPasskeyData.contextNumber}</p>
+                    <p className="text-purple-300 text-xs mt-1">Select this on your phone</p>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-center text-purple-200 text-sm mb-4">
+                  <div className="animate-pulse w-2 h-2 bg-yellow-400 rounded-full mr-2"></div>
+                  Waiting for phone...
+                </div>
+
+                <button
+                  onClick={cancelLinkPasskey}
+                  className="w-full py-2 px-4 bg-white/10 hover:bg-white/20 text-purple-300 font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {/* Success message */}
+            {linkPasskeySuccess && (
+              <div className="mt-4 p-3 bg-green-500/20 border border-green-500/50 rounded-lg text-green-200 text-sm">
+                ✅ Passkey successfully linked! You can now login with your passkey.
+              </div>
+            )}
           </div>
 
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 shadow-xl">

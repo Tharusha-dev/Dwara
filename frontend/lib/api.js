@@ -151,3 +151,48 @@ export const checkAuthMethod = async (email) => {
   const response = await api.get(`/auth-method/${encodeURIComponent(email)}`);
   return response.data;
 };
+
+// ============================================
+// LINK PASSKEY TO EXISTING ACCOUNT
+// ============================================
+
+/**
+ * Create a session for linking passkey to existing account
+ * @returns {Promise<{sessionId: string, url: string, challenge: string, contextNumber: number}>}
+ */
+export const createLinkPasskeySession = async () => {
+  const response = await api.post('/link-passkey/create-session');
+  return response.data;
+};
+
+/**
+ * Get link passkey session info
+ * @param {string} sessionId
+ * @returns {Promise<{sessionId: string, email: string, challenge: string, status: string, candidates: number[]}>}
+ */
+export const getLinkPasskeySession = async (sessionId) => {
+  const response = await api.get(`/link-passkey/${sessionId}`);
+  return response.data;
+};
+
+/**
+ * Get registration options for linking passkey
+ * @param {string} sessionId
+ * @param {number} contextNumber
+ * @returns {Promise<Object>} WebAuthn registration options
+ */
+export const getLinkPasskeyRegisterOptions = async (sessionId, contextNumber) => {
+  const response = await api.post(`/link-passkey/${sessionId}/register-options`, { contextNumber });
+  return response.data;
+};
+
+/**
+ * Complete linking passkey to account
+ * @param {string} sessionId
+ * @param {Object} attestation - WebAuthn attestation response
+ * @returns {Promise<{ok: boolean}>}
+ */
+export const completeLinkPasskey = async (sessionId, attestation) => {
+  const response = await api.post(`/link-passkey/${sessionId}/complete`, { attestation });
+  return response.data;
+};

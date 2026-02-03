@@ -13,12 +13,12 @@ model User {
   walletAddress    String?
   didHash          String?
   didDocumentJson  Json?
-  credentialId     String?
-  credentialPubKey String?
+  credentialId     String?  // WebAuthn credential ID (if passkey linked)
+  credentialPubKey String?  // WebAuthn credential public key
   counter          Int      @default(0)
   encryptedPDS     String?
-  passwordSalt     String?  // Salt for password-derived key (not secret, but unique per user)
-  authMethod       String   @default("passkey") // "passkey" or "password"
+  passwordSalt     String?  // Salt for password-derived key (required for all users)
+  hasPasskey       Boolean  @default(false) // Whether passkey is linked
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
