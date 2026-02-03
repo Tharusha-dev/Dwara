@@ -1,6 +1,11 @@
 #!/bin/bash
 
 # Production Deployment Script for Dwara MVP
+# 
+# Usage:
+#   ./deploy-prod.sh                    # Normal deploy
+#   RESET_DB=true ./deploy-prod.sh      # Deploy with database reset (clears all data!)
+#   DOMAIN=mydomain.com ./deploy-prod.sh # Deploy with custom domain
 
 set -e
 
@@ -14,9 +19,15 @@ NC='\033[0m'
 # Configuration
 DOMAIN=${DOMAIN:-"dwara.yourdomain.com"}
 ENV_FILE=${ENV_FILE:-".env.production"}
+RESET_DB=${RESET_DB:-"false"}
 
 echo -e "${BLUE}🚀 Deploying Dwara MVP to Production${NC}"
 echo -e "${BLUE}Domain: ${DOMAIN}${NC}"
+if [ "$RESET_DB" = "true" ]; then
+    echo -e "${RED}⚠️  Database Reset: ENABLED (all data will be cleared!)${NC}"
+else
+    echo -e "${GREEN}Database Reset: disabled${NC}"
+fi
 echo ""
 
 # Check if running as root
@@ -76,6 +87,14 @@ fi
 # Stop any running containers
 echo -e "${YELLOW}Stopping existing containers...${NC}"
 docker compose down 2>/dev/null || true
+
+# Reset database if requested
+if [ "$RESET_DB" = "true" ]; then
+    echo -e "${RED}🗑️  Resetting database (removing volumes)...${NC}"
+    docker volume rm dwara_postgres_data 2>/dev/null || true
+    docker volume rm dwara_hardhat_data 2>/dev/null || true
+    echo -e "${GREEN}Database volumes removed${NC}"
+fi
 
 # Build and start production services
 echo -e "${YELLOW}Building and starting production services...${NC}"

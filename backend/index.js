@@ -856,6 +856,8 @@ app.get('/me', async (req, res) => {
         email: true,
         walletAddress: true,
         didHash: true,
+        hasPasskey: true,
+        credentialId: true,
         createdAt: true,
       },
     });
@@ -866,6 +868,7 @@ app.get('/me', async (req, res) => {
 
     res.json({
       ...user,
+      hasPasskey: user.hasPasskey || !!user.credentialId,
       did: user.walletAddress
         ? `did:dwara:${user.walletAddress.slice(2, 14).toLowerCase()}`
         : null,
@@ -990,7 +993,6 @@ app.post('/password/register/complete', async (req, res) => {
         didHash: didDocHash,
         didDocumentJson: didDocJson,
         passwordSalt: salt,
-        authMethod: 'password',
         encryptedPDS: encryptedPds || null,
       },
       create: {
@@ -999,7 +1001,6 @@ app.post('/password/register/complete', async (req, res) => {
         didHash: didDocHash,
         didDocumentJson: didDocJson,
         passwordSalt: salt,
-        authMethod: 'password',
         encryptedPDS: encryptedPds || null,
       },
     });
@@ -1078,7 +1079,7 @@ app.post('/password/login/init', async (req, res) => {
       // Return generic error to prevent email enumeration
       return res.status(400).json({ error: 'invalid credentials' });
     }
-    if (!user.passwordSalt || user.authMethod !== 'password') {
+    if (!user.passwordSalt) {
       return res.status(400).json({ error: 'password auth not enabled for this account' });
     }
 
@@ -1194,7 +1195,7 @@ app.get('/auth-method/:email', async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ 
       where: { email: req.params.email },
-      select: { authMethod: true, credentialId: true }
+      select: { passwordSalt: true, credentialId: true, hasPasskey: true }
     });
     
     if (!user) {
@@ -1203,13 +1204,229 @@ app.get('/auth-method/:email', async (req, res) => {
     
     res.json({ 
       exists: true,
-      authMethod: user.authMethod || 'passkey',
-      hasPasskey: !!user.credentialId,
-      hasPassword: user.authMethod === 'password'
+      hasPasskey: user.hasPasskey || !!user.credentialId,
+      hasPassword: !!user.passwordSalt
     });
   } catch (err) {
     console.error('Auth method check error:', err);
     res.status(500).json({ error: 'server error' });
+  }
+});
+
+// ============================================
+// LINK PASSKEY TO EXISTING ACCOUNT
+// ============================================
+
+/**
+ * Create QR session for linking passkey to existing account
+ * Requires authentication (JWT token)
+ */
+app.post('/link-passkey/create-session', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const token = authHeader.slice(7);
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const user = await prisma.user.findUnique({ where: { id: decoded.sub } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    if (user.hasPasskey || user.credentialId) {
+      return res.status(400).json({ error: 'passkey already linked' });
+    }
+
+    const sessionId = uuidv4();
+    const challenge = bufferToBase64url(randomBytes(32));
+    const contextNumber = Math.floor(Math.random() * 90) + 10;
+
+    await prisma.session.create({
+      data: {
+        id: sessionId,
+        type: 'link-passkey',
+        userId: user.id,
+        payload: {
+          email: user.email,
+          userId: user.id,
+          challenge,
+          status: 'pending',
+          contextNumber
+        },
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const url = `${ORIGIN}/qr/link-passkey/${sessionId}`;
+    console.log(`Link passkey session created for ${user.email}: ${sessionId}`);
+    res.json({ sessionId, url, challenge, contextNumber });
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'invalid token' });
+    }
+    console.error('Create link passkey session error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get link passkey session info (for phone)
+ */
+app.get('/link-passkey/:sessionId', async (req, res) => {
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'link-passkey') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    const correctNumber = session.payload.contextNumber;
+    let candidates = [];
+    if (correctNumber) {
+      const correct = parseInt(correctNumber);
+      const decoys = new Set();
+      while (decoys.size < 2) {
+        const decoy = Math.floor(Math.random() * 90) + 10;
+        if (decoy !== correct) decoys.add(decoy);
+      }
+      candidates = [correct, ...decoys].sort(() => Math.random() - 0.5);
+    }
+
+    res.json({
+      sessionId: session.id,
+      email: session.payload.email,
+      challenge: session.payload.challenge,
+      status: session.payload.status,
+      candidates: candidates.length > 0 ? candidates : undefined
+    });
+  } catch (err) {
+    console.error('Get link passkey session error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get registration options for linking passkey (phone requests this)
+ */
+app.post('/link-passkey/:sessionId/register-options', async (req, res) => {
+  try {
+    const { contextNumber } = req.body;
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'link-passkey') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    // Verify context binding
+    if (session.payload.contextNumber) {
+      if (!contextNumber || parseInt(contextNumber) !== parseInt(session.payload.contextNumber)) {
+        return res.status(400).json({ error: 'Incorrect context number' });
+      }
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: session.payload.userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    const opts = await generateRegistrationOptions({
+      rpName: RP_NAME,
+      rpID: RP_ID,
+      userID: user.id,
+      userName: user.email,
+      userDisplayName: user.email,
+      timeout: 60000,
+      attestationType: 'none',
+      excludeCredentials: [],
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      supportedAlgorithmIDs: [-7, -257],
+    });
+
+    // Update session with the challenge
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        payload: { ...session.payload, challenge: opts.challenge },
+      },
+    });
+
+    console.log(`Link passkey registration options created for ${user.email}`);
+    res.json(opts);
+  } catch (err) {
+    console.error('Link passkey register options error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Complete linking passkey to account
+ */
+app.post('/link-passkey/:sessionId/complete', async (req, res) => {
+  try {
+    const { attestation } = req.body;
+
+    const session = await prisma.session.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    if (!session || session.type !== 'link-passkey') {
+      return res.status(404).json({ error: 'session not found' });
+    }
+
+    if (!attestation) {
+      return res.status(400).json({ error: 'attestation required' });
+    }
+
+    const challenge = session.payload.challenge;
+
+    // Verify WebAuthn attestation
+    const verification = await verifyRegistrationResponse({
+      response: attestation,
+      expectedChallenge: challenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: 'webauthn attestation verification failed' });
+    }
+
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    const credentialIdStr = bufferToBase64url(credentialID);
+    const credentialPubKeyStr = Buffer.from(credentialPublicKey).toString('base64');
+
+    // Update user with passkey credentials
+    const user = await prisma.user.update({
+      where: { id: session.payload.userId },
+      data: {
+        credentialId: credentialIdStr,
+        credentialPubKey: credentialPubKeyStr,
+        counter: counter,
+        hasPasskey: true,
+      },
+    });
+
+    // Clean up session
+    await prisma.session.delete({ where: { id: session.id } });
+
+    // Emit socket event to desktop
+    io.to(session.id).emit('passkey-linked', {
+      ok: true,
+      email: user.email,
+    });
+
+    console.log(`Passkey linked for ${user.email}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Link passkey complete error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
   }
 });
 
