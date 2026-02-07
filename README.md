@@ -5,11 +5,42 @@ A decentralized identity system using WebAuthn passkeys, Ethereum wallet, and bl
 ## 🌟 Features
 
 - **Passwordless Authentication**: Uses WebAuthn/Passkeys (Face ID, Touch ID, Windows Hello)
+- **Password-based Authentication**: Also supports traditional password login with blockchain-derived keys
 - **Decentralized Identity (DID)**: Creates and manages DIDs anchored on blockchain
 - **QR Code Login**: Custom relay-based flow with **Phishing-resistant Context Binding**
 - **Client-Side Encryption**: All PII is encrypted with AES-GCM before upload
 - **Blockchain Anchoring**: DID document hashes are stored on a local Hardhat chain
 - **Real-time Updates**: Socket.IO for instant authentication notifications
+- **Profile Management**: Full name, NIC, date of birth, and address
+- **OAuth-like Integration**: "Login with Dwara" for external applications
+- **Linked Apps Management**: Track and revoke access to connected applications
+- **Login History**: Security tracking with device, browser, and location info
+
+## 🔐 External App Integration (Login with Dwara)
+
+Dwara supports OAuth-like authentication for external applications. This allows third-party apps to authenticate users using their Dwara identity.
+
+### How it works:
+
+1. External app initiates OAuth session with Dwara
+2. User is redirected to Dwara's authorization page
+3. User authenticates with their Dwara credentials
+4. User authorizes the app to access their profile
+5. App receives an authorization code
+6. App exchanges the code for user information
+
+### Demo App
+
+A demo "Banking App" is included in the `/external-app` directory, showcasing the integration:
+
+```bash
+# Run with Docker
+docker compose up external-app
+
+# Or run locally
+cd external-app && npm install && npm run dev
+# Available at http://localhost:3001
+```
 
 ## 🏗️ Architecture
 
@@ -19,12 +50,20 @@ A decentralized identity system using WebAuthn passkeys, Ethereum wallet, and bl
 │   (Next.js)     │     │   (Express)     │     │   (Ethereum)    │
 │   Port 3000     │     │   Port 4000     │     │   Port 8545     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-                               │                          │
-                               ▼                          ▼
-                        ┌─────────────────┐     ┌─────────────────┐
-                        │   PostgreSQL    │     │   Blockscout    │
-                        │   Port 5432     │     │   Port 4001     │
-                        └─────────────────┘     └─────────────────┘
+        │                       │                          │
+        │               ┌───────┴───────┐                  │
+        │               ▼               ▼                  ▼
+        │       ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐
+        │       │ PostgreSQL  │  │   OAuth     │  │   Blockscout    │
+        │       │ Port 5432   │  │   System    │  │   Port 4001     │
+        │       └─────────────┘  └─────────────┘  └─────────────────┘
+        │
+        ▼
+┌─────────────────┐
+│  External App   │
+│   (Demo App)    │
+│   Port 3001     │
+└─────────────────┘
 ```
 
 ## 🚀 Quick Start
@@ -220,6 +259,7 @@ dwara-mvp/
 │   ├── contracts/    # Solidity contracts
 │   └── scripts/      # Deploy scripts
 ├── prisma/           # Database schema
+├── external-app/     # Demo external app for OAuth-like integration
 └── docker-compose.yml
 ```
 

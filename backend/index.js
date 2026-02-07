@@ -14,8 +14,9 @@ const {
 const { PrismaClient } = require('@prisma/client');
 const { ethers } = require('ethers');
 const jwt = require('jsonwebtoken');
-const { randomBytes } = require('crypto');
+const { randomBytes, createHash } = require('crypto');
 const { v4: uuidv4 } = require('uuid');
+const UAParser = require('ua-parser-js');
 
 const prisma = new PrismaClient();
 const app = express();
@@ -29,6 +30,52 @@ const io = new Server(server, {
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(bodyParser.json({ limit: '10mb' }));
+
+// Helper to parse user agent
+function parseUserAgent(userAgentString) {
+  const parser = new UAParser(userAgentString);
+  const result = parser.getResult();
+  return {
+    device: result.device.type || 'desktop',
+    browser: `${result.browser.name || 'Unknown'} ${result.browser.version || ''}`.trim(),
+    os: `${result.os.name || 'Unknown'} ${result.os.version || ''}`.trim(),
+  };
+}
+
+// Helper to get client IP
+function getClientIP(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+         req.headers['x-real-ip'] || 
+         req.connection?.remoteAddress || 
+         req.socket?.remoteAddress ||
+         'unknown';
+}
+
+// Helper to record login history
+async function recordLogin(userId, req, appId = null, appName = null, success = true) {
+  try {
+    const userAgentString = req.headers['user-agent'] || '';
+    const parsed = parseUserAgent(userAgentString);
+    const ipAddress = getClientIP(req);
+    
+    await prisma.loginHistory.create({
+      data: {
+        userId,
+        appId,
+        appName: appName || 'Dwara Dashboard',
+        ipAddress,
+        userAgent: userAgentString,
+        device: parsed.device,
+        browser: parsed.browser,
+        os: parsed.os,
+        location: 'Unknown', // In production, use IP geolocation service
+        success,
+      },
+    });
+  } catch (err) {
+    console.warn('Failed to record login history:', err.message);
+  }
+}
 
 // Environment variables
 const ORIGIN = process.env.ORIGIN || 'http://localhost:3000';
@@ -808,6 +855,9 @@ app.post('/qr/:sessionId/assertion', async (req, res) => {
       },
     });
 
+    // Record login history
+    await recordLogin(user.id, req, null, 'Dwara Dashboard (Passkey)', true);
+
     // Generate JWT
     const token = jwt.sign(
       {
@@ -859,6 +909,10 @@ app.get('/me', async (req, res) => {
         hasPasskey: true,
         credentialId: true,
         createdAt: true,
+        fullName: true,
+        nic: true,
+        dateOfBirth: true,
+        address: true,
       },
     });
 
@@ -942,7 +996,7 @@ app.post('/password/register/init', async (req, res) => {
 
 /**
  * Complete password-based registration
- * Client sends: derived wallet address, DID doc, and signature proof
+ * Client sends: derived wallet address, DID doc, profile data, and signature proof
  * Password is NEVER transmitted - only the derived public key
  */
 app.post('/password/register/complete', async (req, res) => {
@@ -954,10 +1008,20 @@ app.post('/password/register/complete', async (req, res) => {
       didDocHash,
       proofSignature, // Signature of sessionId to prove ownership of derived key
       encryptedPds,
+      // Profile fields
+      fullName,
+      nic,
+      dateOfBirth,
+      address: userAddress,
     } = req.body;
 
     if (!sessionId || !ethAddress || !didDocJson || !didDocHash || !proofSignature) {
       return res.status(400).json({ error: 'missing required fields' });
+    }
+
+    // Validate profile fields
+    if (!fullName || !nic || !dateOfBirth || !userAddress) {
+      return res.status(400).json({ error: 'profile fields (fullName, nic, dateOfBirth, address) are required' });
     }
 
     // Get the registration session
@@ -985,7 +1049,10 @@ app.post('/password/register/complete', async (req, res) => {
       return res.status(400).json({ error: 'invalid proof signature' });
     }
 
-    // Create or update the user with password-based auth
+    // Parse date of birth
+    const dob = new Date(dateOfBirth);
+
+    // Create or update the user with password-based auth and profile data
     const user = await prisma.user.upsert({
       where: { email },
       update: {
@@ -994,6 +1061,10 @@ app.post('/password/register/complete', async (req, res) => {
         didDocumentJson: didDocJson,
         passwordSalt: salt,
         encryptedPDS: encryptedPds || null,
+        fullName,
+        nic,
+        dateOfBirth: dob,
+        address: userAddress,
       },
       create: {
         email,
@@ -1002,6 +1073,10 @@ app.post('/password/register/complete', async (req, res) => {
         didDocumentJson: didDocJson,
         passwordSalt: salt,
         encryptedPDS: encryptedPds || null,
+        fullName,
+        nic,
+        dateOfBirth: dob,
+        address: userAddress,
       },
     });
 
@@ -1158,6 +1233,9 @@ app.post('/password/login/complete', async (req, res) => {
     if (!user) {
       return res.status(404).json({ error: 'user not found' });
     }
+
+    // Record login history
+    await recordLogin(user.id, req, null, 'Dwara Dashboard', true);
 
     // Generate JWT token
     const token = jwt.sign(
@@ -1427,6 +1505,604 @@ app.post('/link-passkey/:sessionId/complete', async (req, res) => {
   } catch (err) {
     console.error('Link passkey complete error:', err);
     res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+// ============================================
+// OAUTH-LIKE "LOGIN WITH DWARA" ENDPOINTS
+// ============================================
+
+/**
+ * Create OAuth authorization session
+ * External apps call this to initiate the login flow
+ */
+app.post('/oauth/authorize', async (req, res) => {
+  try {
+    const { 
+      appId, 
+      appName, 
+      appDomain, 
+      redirectUri, 
+      state, 
+      scopes = ['profile', 'email'],
+      codeChallenge 
+    } = req.body;
+
+    if (!appId || !appName || !appDomain || !redirectUri) {
+      return res.status(400).json({ error: 'appId, appName, appDomain, and redirectUri are required' });
+    }
+
+    // Validate redirectUri matches appDomain
+    try {
+      const redirectUrl = new URL(redirectUri);
+      const appDomainUrl = new URL(appDomain);
+      if (redirectUrl.hostname !== appDomainUrl.hostname) {
+        return res.status(400).json({ error: 'redirectUri must match appDomain' });
+      }
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    const sessionId = uuidv4();
+    const challenge = bufferToBase64url(randomBytes(32));
+    const contextNumber = Math.floor(Math.random() * 90) + 10;
+
+    await prisma.oAuthSession.create({
+      data: {
+        id: sessionId,
+        appId,
+        appName,
+        appDomain,
+        redirectUri,
+        state: state || null,
+        codeChallenge: codeChallenge || null,
+        scopes,
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+      },
+    });
+
+    // Create a regular session for the QR flow
+    await prisma.session.create({
+      data: {
+        id: `oauth-${sessionId}`,
+        type: 'oauth-login',
+        payload: { 
+          oauthSessionId: sessionId,
+          challenge,
+          contextNumber,
+          status: 'pending'
+        },
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const authorizationUrl = `${ORIGIN}/oauth/authorize/${sessionId}`;
+    console.log(`OAuth session created for ${appName}: ${sessionId}`);
+    
+    res.json({ 
+      sessionId, 
+      authorizationUrl,
+      challenge,
+      contextNumber
+    });
+  } catch (err) {
+    console.error('OAuth authorize error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Get OAuth session info (for authorization page)
+ */
+app.get('/oauth/session/:sessionId', async (req, res) => {
+  try {
+    const oauthSession = await prisma.oAuthSession.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    
+    if (!oauthSession) {
+      return res.status(404).json({ error: 'session not found' });
+    }
+    
+    if (oauthSession.expiresAt < new Date()) {
+      return res.status(400).json({ error: 'session expired' });
+    }
+
+    const session = await prisma.session.findUnique({
+      where: { id: `oauth-${req.params.sessionId}` },
+    });
+
+    res.json({
+      sessionId: oauthSession.id,
+      appId: oauthSession.appId,
+      appName: oauthSession.appName,
+      appDomain: oauthSession.appDomain,
+      scopes: oauthSession.scopes,
+      status: oauthSession.status,
+      challenge: session?.payload?.challenge,
+      contextNumber: session?.payload?.contextNumber,
+    });
+  } catch (err) {
+    console.error('Get OAuth session error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get authentication options for OAuth login (phone requests this)
+ */
+app.post('/oauth/:sessionId/auth-options', async (req, res) => {
+  try {
+    const { email, contextNumber } = req.body;
+    
+    const oauthSession = await prisma.oAuthSession.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    
+    if (!oauthSession || oauthSession.status !== 'pending') {
+      return res.status(404).json({ error: 'session not found or already used' });
+    }
+
+    const session = await prisma.session.findUnique({
+      where: { id: `oauth-${req.params.sessionId}` },
+    });
+
+    // Verify context binding
+    if (session?.payload?.contextNumber) {
+      if (!contextNumber || parseInt(contextNumber) !== parseInt(session.payload.contextNumber)) {
+        return res.status(400).json({ error: 'Incorrect context number' });
+      }
+    }
+
+    // Get user's credential
+    let allowCredentials = [];
+    if (email) {
+      const user = await prisma.user.findUnique({ where: { email } });
+      if (user && user.credentialId) {
+        allowCredentials = [
+          {
+            id: base64urlToBuffer(user.credentialId),
+            type: 'public-key',
+            transports: ['internal', 'hybrid'],
+          },
+        ];
+      }
+    }
+
+    const opts = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      timeout: 60000,
+      allowCredentials,
+      userVerification: 'preferred',
+      challenge: session?.payload?.challenge,
+    });
+
+    // Update session with email
+    await prisma.session.update({
+      where: { id: `oauth-${req.params.sessionId}` },
+      data: {
+        payload: { ...session.payload, challenge: opts.challenge, email },
+      },
+    });
+
+    res.json(opts);
+  } catch (err) {
+    console.error('OAuth auth options error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Verify assertion and authorize the OAuth session
+ */
+app.post('/oauth/:sessionId/authorize', async (req, res) => {
+  try {
+    const { assertion, email } = req.body;
+    
+    const oauthSession = await prisma.oAuthSession.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    
+    if (!oauthSession || oauthSession.status !== 'pending') {
+      return res.status(404).json({ error: 'session not found or already used' });
+    }
+
+    const session = await prisma.session.findUnique({
+      where: { id: `oauth-${req.params.sessionId}` },
+    });
+
+    // Find user
+    let user = null;
+    if (email) {
+      user = await prisma.user.findUnique({ where: { email } });
+    }
+    if (!user && assertion.id) {
+      user = await prisma.user.findFirst({
+        where: { credentialId: assertion.id },
+      });
+    }
+
+    if (!user || !user.credentialId || !user.credentialPubKey) {
+      return res.status(404).json({ error: 'user not found or no credentials' });
+    }
+
+    // Verify assertion
+    const verification = await verifyAuthenticationResponse({
+      response: assertion,
+      expectedChallenge: session.payload.challenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+      authenticator: {
+        credentialID: base64urlToBuffer(user.credentialId),
+        credentialPublicKey: Buffer.from(user.credentialPubKey, 'base64'),
+        counter: user.counter || 0,
+      },
+    });
+
+    if (!verification.verified) {
+      return res.status(400).json({ error: 'assertion verification failed' });
+    }
+
+    // Update counter
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { counter: verification.authenticationInfo.newCounter },
+    });
+
+    // Generate authorization code
+    const authCode = bufferToBase64url(randomBytes(32));
+
+    // Update OAuth session
+    await prisma.oAuthSession.update({
+      where: { id: req.params.sessionId },
+      data: {
+        status: 'authorized',
+        userId: user.id,
+        authCode,
+      },
+    });
+
+    // Link app to user
+    await prisma.linkedApp.upsert({
+      where: {
+        userId_appId: {
+          userId: user.id,
+          appId: oauthSession.appId,
+        },
+      },
+      update: {
+        lastUsedAt: new Date(),
+        scopes: oauthSession.scopes,
+      },
+      create: {
+        userId: user.id,
+        appId: oauthSession.appId,
+        appName: oauthSession.appName,
+        appDomain: oauthSession.appDomain,
+        scopes: oauthSession.scopes,
+      },
+    });
+
+    // Record login history
+    await recordLogin(user.id, req, oauthSession.appId, oauthSession.appName);
+
+    // Clean up session
+    await prisma.session.delete({ where: { id: `oauth-${req.params.sessionId}` } });
+
+    // Build redirect URL with auth code
+    const redirectUrl = new URL(oauthSession.redirectUri);
+    redirectUrl.searchParams.set('code', authCode);
+    if (oauthSession.state) {
+      redirectUrl.searchParams.set('state', oauthSession.state);
+    }
+
+    // Emit socket event to desktop
+    io.to(req.params.sessionId).emit('oauth-authorized', {
+      authCode,
+      redirectUri: redirectUrl.toString(),
+    });
+
+    console.log(`OAuth authorization complete for ${user.email} -> ${oauthSession.appName}`);
+    res.json({ 
+      ok: true, 
+      authCode,
+      redirectUri: redirectUrl.toString()
+    });
+  } catch (err) {
+    console.error('OAuth authorize error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Password-based OAuth authorization
+ */
+app.post('/oauth/:sessionId/authorize-password', async (req, res) => {
+  try {
+    const { email, signature, challenge } = req.body;
+    
+    const oauthSession = await prisma.oAuthSession.findUnique({
+      where: { id: req.params.sessionId },
+    });
+    
+    if (!oauthSession || oauthSession.status !== 'pending') {
+      return res.status(404).json({ error: 'session not found or already used' });
+    }
+
+    // Find user
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !user.walletAddress || !user.passwordSalt) {
+      return res.status(404).json({ error: 'user not found or password auth not enabled' });
+    }
+
+    // Verify signature
+    try {
+      const recovered = ethers.verifyMessage(challenge, signature);
+      if (recovered.toLowerCase() !== user.walletAddress.toLowerCase()) {
+        return res.status(400).json({ error: 'invalid password' });
+      }
+    } catch (sigErr) {
+      return res.status(400).json({ error: 'invalid signature' });
+    }
+
+    // Generate authorization code
+    const authCode = bufferToBase64url(randomBytes(32));
+
+    // Update OAuth session
+    await prisma.oAuthSession.update({
+      where: { id: req.params.sessionId },
+      data: {
+        status: 'authorized',
+        userId: user.id,
+        authCode,
+      },
+    });
+
+    // Link app to user
+    await prisma.linkedApp.upsert({
+      where: {
+        userId_appId: {
+          userId: user.id,
+          appId: oauthSession.appId,
+        },
+      },
+      update: {
+        lastUsedAt: new Date(),
+        scopes: oauthSession.scopes,
+      },
+      create: {
+        userId: user.id,
+        appId: oauthSession.appId,
+        appName: oauthSession.appName,
+        appDomain: oauthSession.appDomain,
+        scopes: oauthSession.scopes,
+      },
+    });
+
+    // Record login history
+    await recordLogin(user.id, req, oauthSession.appId, oauthSession.appName);
+
+    // Build redirect URL
+    const redirectUrl = new URL(oauthSession.redirectUri);
+    redirectUrl.searchParams.set('code', authCode);
+    if (oauthSession.state) {
+      redirectUrl.searchParams.set('state', oauthSession.state);
+    }
+
+    // Emit socket event
+    io.to(req.params.sessionId).emit('oauth-authorized', {
+      authCode,
+      redirectUri: redirectUrl.toString(),
+    });
+
+    console.log(`OAuth (password) authorization complete for ${user.email} -> ${oauthSession.appName}`);
+    res.json({ 
+      ok: true, 
+      authCode,
+      redirectUri: redirectUrl.toString()
+    });
+  } catch (err) {
+    console.error('OAuth password authorize error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+/**
+ * Exchange authorization code for user info (token endpoint)
+ */
+app.post('/oauth/token', async (req, res) => {
+  try {
+    const { code, appId, appSecret, codeVerifier } = req.body;
+
+    if (!code || !appId) {
+      return res.status(400).json({ error: 'code and appId are required' });
+    }
+
+    const oauthSession = await prisma.oAuthSession.findUnique({
+      where: { authCode: code },
+    });
+
+    if (!oauthSession) {
+      return res.status(404).json({ error: 'invalid authorization code' });
+    }
+
+    if (oauthSession.status !== 'authorized') {
+      return res.status(400).json({ error: 'authorization code already used or expired' });
+    }
+
+    if (oauthSession.appId !== appId) {
+      return res.status(400).json({ error: 'appId mismatch' });
+    }
+
+    // PKCE verification if code challenge was provided
+    if (oauthSession.codeChallenge && codeVerifier) {
+      const hash = createHash('sha256').update(codeVerifier).digest('base64url');
+      if (hash !== oauthSession.codeChallenge) {
+        return res.status(400).json({ error: 'invalid code_verifier' });
+      }
+    }
+
+    // Get user
+    const user = await prisma.user.findUnique({
+      where: { id: oauthSession.userId },
+      select: {
+        id: true,
+        email: true,
+        walletAddress: true,
+        didHash: true,
+        fullName: true,
+        nic: true,
+        dateOfBirth: true,
+        address: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'user not found' });
+    }
+
+    // Mark session as completed
+    await prisma.oAuthSession.update({
+      where: { id: oauthSession.id },
+      data: { status: 'completed' },
+    });
+
+    // Build user info based on scopes
+    const userInfo = {
+      id: user.id,
+      did: user.walletAddress
+        ? `did:dwara:${user.walletAddress.slice(2, 14).toLowerCase()}`
+        : null,
+    };
+
+    if (oauthSession.scopes.includes('email')) {
+      userInfo.email = user.email;
+    }
+
+    if (oauthSession.scopes.includes('profile')) {
+      userInfo.fullName = user.fullName;
+      userInfo.nic = user.nic;
+      userInfo.dateOfBirth = user.dateOfBirth;
+      userInfo.address = user.address;
+      userInfo.walletAddress = user.walletAddress;
+    }
+
+    // Generate a short-lived access token for this app
+    const accessToken = jwt.sign(
+      {
+        sub: user.id,
+        appId: oauthSession.appId,
+        scopes: oauthSession.scopes,
+      },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    console.log(`OAuth token exchanged for ${user.email} -> ${oauthSession.appName}`);
+    res.json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      user: userInfo,
+    });
+  } catch (err) {
+    console.error('OAuth token error:', err);
+    res.status(500).json({ error: 'server error', details: err.message });
+  }
+});
+
+// ============================================
+// USER DASHBOARD ENDPOINTS
+// ============================================
+
+/**
+ * Get linked apps for the current user
+ */
+app.get('/me/linked-apps', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const token = authHeader.slice(7);
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const linkedApps = await prisma.linkedApp.findMany({
+      where: { userId: decoded.sub },
+      orderBy: { lastUsedAt: 'desc' },
+    });
+
+    res.json(linkedApps);
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'invalid token' });
+    }
+    console.error('Get linked apps error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Revoke a linked app
+ */
+app.delete('/me/linked-apps/:appId', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const token = authHeader.slice(7);
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    await prisma.linkedApp.deleteMany({
+      where: { 
+        userId: decoded.sub,
+        appId: req.params.appId,
+      },
+    });
+
+    console.log(`App ${req.params.appId} unlinked for user ${decoded.sub}`);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'invalid token' });
+    }
+    console.error('Revoke app error:', err);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+/**
+ * Get login history for the current user
+ */
+app.get('/me/login-history', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const token = authHeader.slice(7);
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const limit = parseInt(req.query.limit) || 20;
+    const loginHistory = await prisma.loginHistory.findMany({
+      where: { userId: decoded.sub },
+      orderBy: { loginAt: 'desc' },
+      take: limit,
+    });
+
+    res.json(loginHistory);
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'invalid token' });
+    }
+    console.error('Get login history error:', err);
+    res.status(500).json({ error: 'server error' });
   }
 });
 

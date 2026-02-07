@@ -10,6 +10,12 @@ export default function Home() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  // Profile fields
+  const [fullName, setFullName] = useState('');
+  const [nic, setNic] = useState('');
+  const [dateOfBirth, setDateOfBirth] = useState('');
+  const [address, setAddress] = useState('');
+  
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [registrationResult, setRegistrationResult] = useState(null);
@@ -21,6 +27,13 @@ export default function Home() {
     setError('');
 
     try {
+      // Validate profile fields
+      if (!fullName || !nic || !dateOfBirth || !address) {
+        setError('Please fill in all profile fields');
+        setLoading(false);
+        return;
+      }
+
       // Validate password
       const validation = validatePassword(password);
       if (!validation.valid) {
@@ -39,10 +52,10 @@ export default function Home() {
       const { sessionId, salt } = await initPasswordRegister(email, null);
 
       // Step 2: Derive wallet from password + salt (client-side only)
-      const { wallet, address } = await deriveWallet(password, salt);
+      const { wallet, address: walletAddress } = await deriveWallet(password, salt);
 
       // Step 3: Build DID document
-      const didDoc = buildDIDDocument(address, email);
+      const didDoc = buildDIDDocument(walletAddress, email);
       const didDocHash = hashDIDDocument(didDoc);
 
       // Step 4: Sign the sessionId as proof of key ownership
@@ -51,14 +64,19 @@ export default function Home() {
       // Step 5: Sign the DID doc hash
       const sigEth = await wallet.signMessage(didDocHash);
 
-      // Step 6: Complete registration
+      // Step 6: Complete registration with profile data
       const result = await completePasswordRegister({
         sessionId,
-        ethAddress: address,
+        ethAddress: walletAddress,
         didDocJson: didDoc,
         didDocHash,
         proofSignature,
         sigEth,
+        // Profile fields
+        fullName,
+        nic,
+        dateOfBirth,
+        address,
       });
 
       // Save token
@@ -141,49 +159,118 @@ export default function Home() {
           <h2 className="text-2xl font-semibold text-white mb-6">Create Account</h2>
           
           <form onSubmit={handleSignUp} className="space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-purple-200 mb-2">
-                Email Address
-              </label>
-              <input
-                type="email"
-                id="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                required
-                className="w-full px-4 py-3 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              />
+            {/* Profile Section */}
+            <div className="space-y-3 pb-4 border-b border-purple-500/30">
+              <h3 className="text-sm font-medium text-purple-300">Personal Information</h3>
+              
+              <div>
+                <label htmlFor="fullName" className="block text-sm font-medium text-purple-200 mb-1">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  id="fullName"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="John Doe"
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="nic" className="block text-sm font-medium text-purple-200 mb-1">
+                  NIC (National ID)
+                </label>
+                <input
+                  type="text"
+                  id="nic"
+                  value={nic}
+                  onChange={(e) => setNic(e.target.value)}
+                  placeholder="123456789V"
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="dateOfBirth" className="block text-sm font-medium text-purple-200 mb-1">
+                  Date of Birth
+                </label>
+                <input
+                  type="date"
+                  id="dateOfBirth"
+                  value={dateOfBirth}
+                  onChange={(e) => setDateOfBirth(e.target.value)}
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="address" className="block text-sm font-medium text-purple-200 mb-1">
+                  Address
+                </label>
+                <textarea
+                  id="address"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="123 Main Street, City, Country"
+                  required
+                  rows={2}
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm resize-none"
+                />
+              </div>
             </div>
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-purple-200 mb-2">
-                Password
-              </label>
-              <input
-                type="password"
-                id="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-4 py-3 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              />
-            </div>
+            {/* Account Section */}
+            <div className="space-y-3 pt-2">
+              <h3 className="text-sm font-medium text-purple-300">Account Credentials</h3>
 
-            <div>
-              <label htmlFor="confirm-password" className="block text-sm font-medium text-purple-200 mb-2">
-                Confirm Password
-              </label>
-              <input
-                type="password"
-                id="confirm-password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-4 py-3 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              />
+              <div>
+                <label htmlFor="email" className="block text-sm font-medium text-purple-200 mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  id="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="password" className="block text-sm font-medium text-purple-200 mb-1">
+                  Password
+                </label>
+                <input
+                  type="password"
+                  id="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="confirm-password" className="block text-sm font-medium text-purple-200 mb-1">
+                  Confirm Password
+                </label>
+                <input
+                  type="password"
+                  id="confirm-password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg bg-white/5 border border-purple-500/30 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                />
+              </div>
             </div>
 
             {error && (
@@ -194,7 +281,7 @@ export default function Home() {
 
             <button
               type="submit"
-              disabled={loading || !email || !password || !confirmPassword}
+              disabled={loading || !email || !password || !confirmPassword || !fullName || !nic || !dateOfBirth || !address}
               className="w-full py-3 px-4 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 text-white font-semibold rounded-lg transition-colors duration-200"
             >
               {loading ? (
