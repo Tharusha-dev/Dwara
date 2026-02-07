@@ -19,8 +19,58 @@ model User {
   encryptedPDS     String?
   passwordSalt     String?  // Salt for password-derived key (required for all users)
   hasPasskey       Boolean  @default(false) // Whether passkey is linked
+  
+  // Profile fields - required for account creation
+  fullName         String?
+  nic              String?  // National Identity Card number
+  dateOfBirth      DateTime?
+  address          String?
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  
+  // Relations
+  linkedApps       LinkedApp[]
+  loginHistory     LoginHistory[]
+}
+
+// External applications that integrate with Dwara
+model LinkedApp {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appId       String   // Unique identifier for the external app
+  appName     String   // Display name of the app
+  appDomain   String   // Domain of the app
+  appIcon     String?  // Icon URL for the app
+  scopes      String[] // Permissions granted to the app
+  linkedAt    DateTime @default(now())
+  lastUsedAt  DateTime @default(now())
+  
+  @@unique([userId, appId])
+  @@index([userId])
+}
+
+// Login history for security tracking
+model LoginHistory {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appId       String?  // null for main Dwara login
+  appName     String?  // Name of external app or "Dwara Dashboard"
+  ipAddress   String?
+  userAgent   String?
+  device      String?  // Parsed device info
+  browser     String?  // Parsed browser info
+  os          String?  // Parsed OS info
+  location    String?  // Geo location based on IP
+  country     String?
+  city        String?
+  success     Boolean  @default(true)
+  loginAt     DateTime @default(now())
+  
+  @@index([userId])
+  @@index([loginAt])
 }
 
 model Session {
@@ -30,4 +80,23 @@ model Session {
   payload   Json
   createdAt DateTime @default(now())
   expiresAt DateTime?
+}
+
+// OAuth-like authorization sessions for external apps
+model OAuthSession {
+  id            String   @id @default(uuid())
+  appId         String
+  appName       String
+  appDomain     String
+  redirectUri   String
+  state         String?  // CSRF protection
+  codeChallenge String?  // PKCE support
+  scopes        String[] // Requested permissions
+  status        String   @default("pending") // pending, authorized, completed, expired
+  userId        String?  // Set when user authorizes
+  authCode      String?  @unique // Generated after authorization
+  createdAt     DateTime @default(now())
+  expiresAt     DateTime
+  
+  @@index([authCode])
 }

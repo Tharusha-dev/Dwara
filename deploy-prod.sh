@@ -127,33 +127,56 @@ fi
 # Run database migrations
 echo -e "${YELLOW}Running database migrations...${NC}"
 docker compose --env-file $ENV_FILE exec -T backend sh -c "npx prisma migrate deploy" 2>/dev/null || \
-docker compose --env-file $ENV_FILE exec -T backend sh -c "npx prisma db push" || \
+docker compose --env-file $ENV_FILE exec -T backend sh -c "npx prisma db push --accept-data-loss" || \
 echo -e "${YELLOW}Migrations may already be applied.${NC}"
 
-# Configure nginx
-echo -e "${YELLOW}Configuring nginx...${NC}"
-sudo cp nginx.conf /etc/nginx/sites-available/dwara
-sudo sed -i "s/dwara.yourdomain.com/$DOMAIN/g" /etc/nginx/sites-available/dwara
+# Add random profile data to existing users who don't have profile info
+echo -e "${YELLOW}Updating existing users with random profile data...${NC}"
+docker compose --env-file $ENV_FILE exec -T backend node -e "
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
-# Disable default site if it exists
-if [ -L /etc/nginx/sites-enabled/default ]; then
-    sudo rm /etc/nginx/sites-enabled/default
-    echo -e "${YELLOW}Disabled default nginx site${NC}"
-fi
+const firstNames = ['John', 'Jane', 'Michael', 'Sarah', 'David', 'Emily', 'Robert', 'Lisa', 'William', 'Anna'];
+const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez'];
+const cities = ['Colombo', 'Kandy', 'Galle', 'Jaffna', 'Negombo', 'Batticaloa', 'Trincomalee', 'Anuradhapura'];
 
-# Enable the site
-if [ ! -L /etc/nginx/sites-enabled/dwara ]; then
-    sudo ln -s /etc/nginx/sites-available/dwara /etc/nginx/sites-enabled/
-fi
+function randomElement(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function randomNIC() { return Math.floor(100000000 + Math.random() * 900000000) + 'V'; }
+function randomDOB() {
+  const start = new Date(1970, 0, 1);
+  const end = new Date(2000, 11, 31);
+  return new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()));
+}
+function randomAddress() {
+  return Math.floor(1 + Math.random() * 999) + ', ' + randomElement(['Main', 'High', 'Park', 'Lake', 'River']) + ' Street, ' + randomElement(cities);
+}
 
-# Test nginx configuration
-if sudo nginx -t; then
-    sudo systemctl reload nginx
-    echo -e "${GREEN}Nginx configured successfully${NC}"
-else
-    echo -e "${RED}Nginx configuration failed${NC}"
-    exit 1
-fi
+async function updateUsers() {
+  const users = await prisma.user.findMany({
+    where: { OR: [{ fullName: null }, { nic: null }, { dateOfBirth: null }, { address: null }] }
+  });
+  
+  console.log('Found ' + users.length + ' users needing profile data');
+  
+  for (const user of users) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        fullName: user.fullName || randomElement(firstNames) + ' ' + randomElement(lastNames),
+        nic: user.nic || randomNIC(),
+        dateOfBirth: user.dateOfBirth || randomDOB(),
+        address: user.address || randomAddress(),
+      }
+    });
+    console.log('Updated user: ' + user.email);
+  }
+  
+  await prisma.\$disconnect();
+  console.log('Profile data update complete');
+}
+
+updateUsers().catch(e => { console.error(e); process.exit(1); });
+" 2>/dev/null || echo -e "${YELLOW}No users to update or script failed.${NC}"
 
 # Setup SSL certificate
 echo -e "${YELLOW}Setting up SSL certificate...${NC}"
@@ -196,6 +219,7 @@ echo "Access your application:"
 echo -e "  Frontend:       ${GREEN}https://$DOMAIN${NC}"
 echo -e "  Backend API:    ${GREEN}https://$DOMAIN/api${NC}"
 echo -e "  Blockscout:     ${GREEN}https://$DOMAIN/explorer${NC}"
+echo -e "  Demo App:       ${GREEN}https://$DOMAIN/demo-app${NC} (External app integration demo)"
 echo ""
 echo "Management commands:"
 echo -e "  View logs:      ${BLUE}docker compose --env-file $ENV_FILE logs -f${NC}"

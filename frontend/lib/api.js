@@ -196,3 +196,67 @@ export const completeLinkPasskey = async (sessionId, attestation) => {
   const response = await api.post(`/link-passkey/${sessionId}/complete`, { attestation });
   return response.data;
 };
+
+// ============================================
+// LINKED APPS & LOGIN HISTORY
+// ============================================
+
+/**
+ * Get linked apps for the current user
+ * @returns {Promise<Array>}
+ */
+export const getLinkedApps = async () => {
+  const response = await api.get('/me/linked-apps');
+  return response.data;
+};
+
+/**
+ * Revoke a linked app
+ * @param {string} appId
+ * @returns {Promise<{ok: boolean}>}
+ */
+export const revokeLinkedApp = async (appId) => {
+  const response = await api.delete(`/me/linked-apps/${appId}`);
+  return response.data;
+};
+
+/**
+ * Get login history for the current user
+ * @param {number} limit - Max number of records
+ * @returns {Promise<Array>}
+ */
+export const getLoginHistory = async (limit = 20) => {
+  const response = await api.get(`/me/login-history?limit=${limit}`);
+  return response.data;
+};
+
+// ============================================
+// OAUTH API FOR EXTERNAL APPS
+// ============================================
+
+/**
+ * Get OAuth session info
+ * @param {string} sessionId
+ * @returns {Promise<Object>}
+ */
+export const getOAuthSession = async (sessionId) => {
+  const response = await api.get(`/oauth/session/${sessionId}`);
+  return response.data;
+};
+
+/**
+ * Authorize OAuth session with password
+ * @param {string} sessionId
+ * @param {string} email
+ * @param {string} signature
+ * @param {string} challenge
+ * @returns {Promise<Object>}
+ */
+export const authorizeOAuthPassword = async (sessionId, email, signature, challenge) => {
+  const response = await api.post(`/oauth/${sessionId}/authorize-password`, {
+    email,
+    signature,
+    challenge,
+  });
+  return response.data;
+};

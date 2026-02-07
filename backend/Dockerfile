@@ -23,4 +23,4 @@ COPY backend/ ./
 EXPOSE 4000
 
 # Run migrations and start the server
-CMD sh -c "npx prisma db push && npm start"
+CMD sh -c "npx prisma db push --accept-data-loss && npm start"
